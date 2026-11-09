@@ -1,0 +1,120 @@
+{
+  "lang": {
+    "zh": {
+      "grpPlayback": "播放设置",
+      "grpOnline": "在线音乐",
+      "grpLocal": "本地音乐",
+      "volume": "音量",
+      "volumeDesc": "0 到 100，直接调用 K1 系统音量接口",
+      "unitPercent": "%",
+      "mute": "静音",
+      "muteTrue": "已静音",
+      "muteFalse": "未静音",
+      "seek": "播放进度",
+      "seekDesc": "拖动后从该百分比位置继续播放",
+      "keyword": "搜索关键词",
+      "keywordDesc": "输入歌名后，点“搜索”按钮获取公开音频链接",
+      "keywordPlaceholder": "例如：周杰伦 稻香",
+      "url": "音频直链",
+      "urlDesc": "支持 mp3 / wav 的公开 http(s) 链接",
+      "urlPlaceholder": "https://example.com/song.mp3",
+      "mode": "播放模式",
+      "modeDesc": "顺序播放 / 随机播放 / 单曲循环",
+      "modeOrder": "顺序播放",
+      "modeShuffle": "随机播放",
+      "modeRepeatOne": "单曲循环"
+    },
+    "en": {
+      "grpPlayback": "Playback",
+      "grpOnline": "Online Music",
+      "grpLocal": "Local Music",
+      "volume": "Volume",
+      "volumeDesc": "0 to 100, applied to the K1 system volume",
+      "unitPercent": "%",
+      "mute": "Mute",
+      "muteTrue": "Muted",
+      "muteFalse": "Unmuted",
+      "seek": "Playback position",
+      "seekDesc": "Drag to jump to that percentage of the track",
+      "keyword": "Search keyword",
+      "keywordDesc": "Type a song name, then tap Search to fetch a public audio link",
+      "keywordPlaceholder": "e.g. Beethoven Symphony 5",
+      "url": "Direct audio URL",
+      "urlDesc": "Public http(s) link to an mp3 / wav file",
+      "urlPlaceholder": "https://example.com/song.mp3",
+      "mode": "Play mode",
+      "modeDesc": "Sequential / shuffle / repeat one",
+      "modeOrder": "Sequential",
+      "modeShuffle": "Shuffle",
+      "modeRepeatOne": "Repeat one"
+    }
+  },
+  "fields": [
+    {
+      "fieldType": "divider",
+      "nameI18nKey": "grpPlayback"
+    },
+    {
+      "fieldType": "integer",
+      "key": "volume",
+      "nameI18nKey": "volume",
+      "descriptionI18nKey": "volumeDesc",
+      "unitI18nKey": "unitPercent",
+      "lowerBound": 0,
+      "upperBound": 100,
+      "defaultValue": 50
+    },
+    {
+      "fieldType": "boolean",
+      "key": "mute",
+      "nameI18nKey": "mute",
+      "trueTextI18nKey": "muteTrue",
+      "falseTextI18nKey": "muteFalse",
+      "defaultValue": false
+    },
+    {
+      "fieldType": "float",
+      "key": "seek_percent",
+      "nameI18nKey": "seek",
+      "descriptionI18nKey": "seekDesc",
+      "unitI18nKey": "unitPercent",
+      "lowerBound": 0.0,
+      "upperBound": 100.0,
+      "defaultValue": 0.0
+    },
+    {
+      "fieldType": "select",
+      "key": "play_mode",
+      "nameI18nKey": "mode",
+      "descriptionI18nKey": "modeDesc",
+      "valueType": "string",
+      "multiple": false,
+      "defaultValue": "order",
+      "options": [
+        { "nameI18nKey": "modeOrder", "value": "order" },
+        { "nameI18nKey": "modeShuffle", "value": "shuffle" },
+        { "nameI18nKey": "modeRepeatOne", "value": "repeat_one" }
+      ]
+    },
+    {
+      "fieldType": "divider",
+      "nameI18nKey": "grpOnline"
+    },
+    {
+      "fieldType": "string",
+      "key": "search_keyword",
+      "nameI18nKey": "keyword",
+      "descriptionI18nKey": "keywordDesc",
+      "placeholderI18nKey": "keywordPlaceholder",
+      "defaultValue": ""
+    },
+    {
+      "fieldType": "string",
+      "key": "online_url",
+      "nameI18nKey": "url",
+      "descriptionI18nKey": "urlDesc",
+      "placeholderI18nKey": "urlPlaceholder",
+      "defaultValue": ""
+    }
+  ]
+}

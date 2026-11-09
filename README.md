@@ -17,6 +17,7 @@
 | Agent | 目录 | 功能 | 版本 | 手柄快捷键 |
 | --- | --- | --- | --- | --- |
 | 音量调节 | [`agents/volume-adjustment`](agents/volume-adjustment/README.md) | 读取 / 增大 / 减小 / 静音机器人系统音量 | 1.0.0 | `A` 音量+ ・ `B` 音量- ・ `Y` 静音 |
+| 音乐播放器 | [`agents/music-player`](agents/music-player/README.md) | 在线音频直链 / 本地歌单，三种播放模式，进度跳转与系统音量 | 1.0.0 | `A` 播放暂停 ・ `X` 上一首 ・ `B` 下一首 ・ `Y` 静音 ・ `LB+A` 切模式 |
 
 > 后续新增的 Agent 会继续加到这张表和 `agents/` 目录下。
 

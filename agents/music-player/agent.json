@@ -1,6 +1,6 @@
 {
     "id": "com.wenzhoujike.k1.music",
-    "version": "1.1.3",
+    "version": "1.1.4",
     "description": "Music player for Booster K1: online mp3 URL / local playlist, play modes, seek, system volume.",
     "logo": "/res/logo.png",
     "entry": "src/main.py:MusicPlayerAgent",

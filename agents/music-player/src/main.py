@@ -161,6 +161,10 @@ class MusicPlayerAgent(AgentBase):
 
         # --- shared state -------------------------------------------------
         self._lock = threading.RLock()
+        # Serializes every call into the framework (component_manager /
+        # page_proxy), which is not thread-safe. The ticker, playback
+        # worker and click callbacks all touch it concurrently.
+        self._ui_lock = threading.Lock()
         self._shutdown = False
         self._tab = PAGE_LOCAL
         self._mode = MODE_ORDER
@@ -676,7 +680,7 @@ class MusicPlayerAgent(AgentBase):
             self._tab = PAGE_ONLINE
         self._use_playlist(PAGE_ONLINE)
         try:
-            self.page_proxy.force_update()
+            self._force_update()
         except Exception:
             pass
         self._push_ui_state()
@@ -687,7 +691,7 @@ class MusicPlayerAgent(AgentBase):
             self._tab = PAGE_LOCAL
         self._use_playlist(PAGE_LOCAL)
         try:
-            self.page_proxy.force_update()
+            self._force_update()
         except Exception:
             pass
         self._push_ui_state()
@@ -926,7 +930,7 @@ class MusicPlayerAgent(AgentBase):
                 f"找到 {len(results)} 首，按播放开始",
             )
             try:
-                self.page_proxy.force_update()
+                self._force_update()
             except Exception:
                 pass
             self._push_ui_state()
@@ -1331,6 +1335,15 @@ class MusicPlayerAgent(AgentBase):
                 pass
         self._push_ui_state()
 
+    def _force_update(self) -> None:
+        """Re-evaluate the active page, serialized with other framework calls."""
+
+        try:
+            with self._ui_lock:
+                self.page_proxy.force_update()
+        except Exception as exc:
+            self.logger.warn(f"force_update failed: {exc}")
+
     # ------------------------------------------------------------------
     # Network supervision
     # ------------------------------------------------------------------
@@ -1359,7 +1372,7 @@ class MusicPlayerAgent(AgentBase):
                         changed = True
             if changed:
                 try:
-                    self.page_proxy.force_update()
+                    self._force_update()
                 except Exception:
                     pass
                 self._push_ui_state()
@@ -1398,6 +1411,10 @@ class MusicPlayerAgent(AgentBase):
         return f"{prefix} {counter} {track.title[:16]}  {_fmt_time(position)}/{_fmt_time(total)}"
 
     def _push_ui_state(self) -> None:
+        with self._ui_lock:
+            self._push_ui_state_locked()
+
+    def _push_ui_state_locked(self) -> None:
         pending = self._toast_pending
         if pending is not None:
             self._toast_pending = None

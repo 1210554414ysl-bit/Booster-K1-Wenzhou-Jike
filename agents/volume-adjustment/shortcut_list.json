@@ -1,0 +1,35 @@
+{
+    "version": "1.0",
+    "shortcut_list": [
+        {
+            "id": "volume_up",
+            "shortcut": [
+                "A"
+            ],
+            "locale_name": {
+                "en": "Volume +",
+                "zh": "音量 +"
+            }
+        },
+        {
+            "id": "volume_down",
+            "shortcut": [
+                "B"
+            ],
+            "locale_name": {
+                "en": "Volume -",
+                "zh": "音量 -"
+            }
+        },
+        {
+            "id": "volume_mute",
+            "shortcut": [
+                "Y"
+            ],
+            "locale_name": {
+                "en": "Mute",
+                "zh": "静音"
+            }
+        }
+    ]
+}

@@ -1,0 +1,36 @@
+{
+    "id": "com.example.volumeagent",
+    "version": "1.0.0",
+    "description": "Adjust the Booster K1 system output volume: read, raise, lower and mute.",
+    "logo": "/res/logo.png",
+    "entry": "src/main.py:VolumeAgent",
+    "debuggable": true,
+    "gait": "default",
+    "requirements": {
+        "models": [
+            "Booster K1"
+        ],
+        "min_api_level": 10700,
+        "nvidia_jetpack_main_versions": [],
+        "qti_qnn_main_versions": [],
+        "compile_api_level": 10800,
+        "platforms": [
+            "sim_x86_64",
+            "sim_aarch64",
+            "real_jetson",
+            "real_qcom"
+        ]
+    },
+    "package_type": "python",
+    "ros2": {
+        "package_name": "com_example_volumeagent",
+        "launch_file": "launch.py"
+    },
+    "locale_name": {
+        "en": "Volume Agent",
+        "zh": "音量调节"
+    },
+    "app_image": {
+        "icon": "/res/logo.png"
+    }
+}

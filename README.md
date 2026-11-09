@@ -80,6 +80,22 @@ Booster-K1-Wenzhou-Jike/
 
 ---
 
+## 版本管理与回滚
+
+每次改动都提交、每个能用的版本都打 tag —— 装坏了 30 秒能退回上一版。
+
+| 内容 | 在哪 |
+| --- | --- |
+| 完整说明（含 git 入门、回滚步骤） | [docs/05-versioning.md](docs/05-versioning.md) |
+| 变更记录 | [CHANGELOG.md](CHANGELOG.md) |
+| 一键发布 | `.\scripts\release.ps1 -Agent music-player -Push` |
+| 历史安装包 | [Releases](https://github.com/1210554414ysl-bit/Booster-K1-Wenzhou-Jike/releases) |
+
+> 一句话流程：改代码 → 构建 → **装真机验证** → `release.ps1` 打 tag → 推送。
+> 出问题就删掉机器人上的 Agent，从 Releases 装回上一个 tag 的包。
+
+---
+
 ## 什么是 Agent
 
 Agent 是部署并运行在**机器人端**的功能程序包。它通过标准接口向 Booster App 声明可交互的组件（按钮、图标、状态、提示等），App 据此动态生成操作界面，把用户的点击下发给 Agent 执行。

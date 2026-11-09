@@ -1,37 +1,34 @@
 # coding: utf-8
-"""Music Player Agent for Booster K1.
+"""Local music player Agent for Booster K1 (online playback removed).
 
-Two tabs (online / local), sequential / shuffle / repeat-one play modes,
-seek, system volume control and persistent settings.
+Plays mp3/wav files from the Agent private storage directory with:
+- play / pause / previous / next
+- sequential / shuffle / repeat-one play modes
+- seek (via a parameter slider, transcoded with ffmpeg)
+- system volume control (buttons + parameter slider + mute)
+- persisted play mode and volume
 
-Layout note
------------
-The App renders agent UI as an icon grid (one grid per *page*), plus a
-schema-driven parameter page. So:
-
-* the two tabs are two ``ComponentStatePageProxy`` pages;
-* transport / mode / mute are icon components;
-* the volume slider, the draggable progress bar and the search keyword live
-  in the parameter page (``res/params/schema.json``).
-
-Every user callback returns immediately: all audio work (ffmpeg transcoding,
-network fetch, playback waiting) happens on worker threads.
+Threading model
+---------------
+* Click callbacks NEVER call blocking SDK audio methods (play_sound / cancel).
+  cancel() waits for a Python state callback that needs the GIL, so calling it
+  from the click callback thread deadlocks.
+* One worker thread per playback owns its handle and polls for pause/stop via a
+  threading.Event; pause just flips state + sets the event.
+* Every framework call (update_component / publish_toast / force_update) is
+  serialized behind a single UI lock.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import random
 import re
 import shutil
-import socket
 import subprocess
 import threading
 import time
-import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
@@ -54,7 +51,6 @@ from boosteros.robots.booster import BoosterRobot
 # Pages / modes
 # ----------------------------------------------------------------------
 PAGE_LOCAL = "page_local"
-PAGE_ONLINE = "page_online"
 
 MODE_ORDER = "order"
 MODE_SHUFFLE = "shuffle"
@@ -69,36 +65,17 @@ MUSIC_DIR = Path("music")
 CACHE_DIR = Path("cache")
 AUDIO_EXTS = (".mp3", ".wav")
 MAX_SCAN_DEPTH = 4
-MAX_ONLINE_RESULTS = 20
 
-# PCM format used when we must transcode (seek / resume / online stream).
 PCM_SAMPLE_RATE = 22050
 PCM_CHANNELS = 1
 
-NETWORK_CHECK_INTERVAL_SEC = 20.0
-NETWORK_TIMEOUT_SEC = 3.0
 UI_TICK_SEC = 1.0
-# Grace window after activation during which parameter callbacks are ignored, so
-# the framework's restored/default parameter pushes cannot clobber our settings.
 PARAM_SETTLE_SEC = 2.0
 FFMPEG_PROBE_TIMEOUT_SEC = 20.0
 FFMPEG_TRANSCODE_TIMEOUT_SEC = 180.0
 PLAYBACK_EXTRA_TIMEOUT_SEC = 30.0
-
-NETEASE_SEARCH_URL = "https://music.163.com/api/search/get/web"
-NETEASE_SONG_URL = "https://music.163.com/api/song/enhance/player/url"
-NETEASE_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120 Safari/537.36"
-    ),
-    "Referer": "https://music.163.com/",
-    "Accept": "*/*",
-}
-ONLINE_DOWNLOAD_TIMEOUT_SEC = 40.0
-MAX_DOWNLOAD_BYTES = 60 * 1024 * 1024
+HANDLE_SETTLE_TIMEOUT_SEC = 5.0
 VOLUME_STEP_PERCENT = 10
-NETWORK_PROBES = (("music.163.com", 443), ("www.baidu.com", 443))
 
 
 def _fmt_time(seconds: float) -> str:
@@ -113,33 +90,18 @@ def _fmt_time(seconds: float) -> str:
 
 
 class Track:
-    """One playable item, local file or remote URL."""
+    """One playable local file."""
 
-    __slots__ = ("title", "artist", "source", "location", "duration")
+    __slots__ = ("title", "location", "duration")
 
-    def __init__(
-        self,
-        title: str,
-        source: str,
-        location: str,
-        artist: str = "",
-        duration: float = 0.0,
-    ) -> None:
+    def __init__(self, title: str, location: str, duration: float = 0.0) -> None:
         self.title = title
-        self.source = source  # "local" | "online"
-        self.location = location  # absolute file path or http(s) url
-        self.artist = artist
+        self.location = location
         self.duration = duration
-
-    @property
-    def display_name(self) -> str:
-        if self.artist:
-            return f"{self.title} - {self.artist}"
-        return self.title
 
 
 class MusicPlayerAgent(AgentBase):
-    """Music player agent."""
+    """Local music player agent."""
 
     # ------------------------------------------------------------------
     # Construction
@@ -152,34 +114,30 @@ class MusicPlayerAgent(AgentBase):
                 param_schema_path="res/params/schema.json",
             )
         )
-        # BoosterRobot() can fail while the motion services are still
-        # starting (simulator boot, robot reboot). Never let that kill the
-        # agent: keep it lazy and retry on demand.
+
+        # --- locks / threading --------------------------------------------
+        self._lock = threading.RLock()
+        # Serializes every framework call (component_manager / page_proxy),
+        # which is not thread-safe.
+        self._ui_lock = threading.Lock()
         self._robot_lock = threading.RLock()
+        self._stop_event = threading.Event()
+        self._shutdown = False
+
+        # --- robot (lazy: motion services may not be ready at boot) --------
         self.robot: Optional[BoosterRobot] = None
         self._get_robot()
 
-        # --- shared state -------------------------------------------------
-        self._lock = threading.RLock()
-        # Serializes every call into the framework (component_manager /
-        # page_proxy), which is not thread-safe. The ticker, playback
-        # worker and click callbacks all touch it concurrently.
-        self._ui_lock = threading.Lock()
-        self._shutdown = False
-        self._tab = PAGE_LOCAL
+        # --- state ---------------------------------------------------------
         self._mode = MODE_ORDER
         self._volume = 50
         self._muted = False
         self._last_nonzero_volume = 50
 
-        # playlist (each tab owns its own list; ``_tracks`` is the active one)
-        self._local_tracks: list[Track] = []
-        self._online_tracks: list[Track] = []
         self._tracks: list[Track] = []
         self._index = -1
         self._shuffle_bag: list[int] = []
 
-        # playback
         self._handle = None
         self._generation = 0
         self._loading = False
@@ -189,15 +147,9 @@ class MusicPlayerAgent(AgentBase):
         self._duration = 0.0
         self._current: Optional[Track] = None
 
-        # online
-        self._online_ok = False
-        self._search_results: list[Track] = []
         self._params: dict[str, Any] = {}
-        # Parameter callbacks are ignored until the persisted settings have been
-        # mirrored into the parameter page (see _activate_worker).
         self._params_ready = False
 
-        # ui refs
         self._ui: dict[str, Component] = {}
         self._last_status_text = ""
         self._toast_pending: Optional[LocaleString] = None
@@ -207,22 +159,17 @@ class MusicPlayerAgent(AgentBase):
         self._ensure_dirs()
         self._load_settings()
         self._build_ui()
-        self._add_volume_buttons()
-        # Populate the playlist even before activation completes; activation only
-        # re-scans. Without this, a start that does not activate shows an empty list.
+        self._register_parameter_callbacks()
         try:
             self._scan_local(refresh_ui=False)
         except Exception as exc:
             self.logger.warn(f"initial scan failed: {exc}")
-        self._register_parameter_callbacks()
 
     # ------------------------------------------------------------------
     # Bootstrap helpers
     # ------------------------------------------------------------------
     @property
     def _storage_root(self) -> Path:
-        """Agent private storage directory (never the whole filesystem)."""
-
         try:
             return Path(str(self.storage_manager.node_config_path))
         except Exception:
@@ -256,43 +203,47 @@ class MusicPlayerAgent(AgentBase):
 
     def _save_settings(self) -> None:
         try:
-            payload = {
-                "mode": self._mode,
-                "volume": self._volume,
-                "muted": self._muted,
-            }
             self.storage_manager.write_text_file(
-                SETTINGS_FILE, json.dumps(payload, ensure_ascii=False)
+                SETTINGS_FILE,
+                json.dumps(
+                    {"mode": self._mode, "volume": self._volume, "muted": self._muted},
+                    ensure_ascii=False,
+                ),
             )
         except Exception as exc:
             self.logger.warn(f"save settings failed: {exc.__class__.__name__}: {exc}")
+
+    def _get_robot(self) -> Optional[BoosterRobot]:
+        with self._robot_lock:
+            if self.robot is not None:
+                return self.robot
+            try:
+                self.robot = BoosterRobot()
+                self.logger.info("BoosterRobot ready")
+            except Exception as exc:
+                self.robot = None
+                self.logger.warn(
+                    f"BoosterRobot init failed (will retry): {exc.__class__.__name__}: {exc}"
+                )
+            return self.robot
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
     def on_agent_activated(self) -> None:
         self.logger.info("MusicPlayerAgent activated")
-
         threading.Thread(target=self._activate_worker, daemon=True).start()
         threading.Thread(target=self._ui_ticker, daemon=True).start()
-        threading.Thread(target=self._network_watcher, daemon=True).start()
 
     def _activate_worker(self) -> None:
         try:
             self._scan_local(refresh_ui=True)
-            # The framework restores ROS parameter values asynchronously during
-            # startup and may push them a moment after activation. Mirror our
-            # persisted settings first, give the framework a short settling
-            # window (callbacks are ignored meanwhile), then assert the values
-            # that came from our own settings file.
             self._refresh_parameter_values()
             time.sleep(PARAM_SETTLE_SEC)
             self._params_ready = True
-            # Retry the robot SDK now that services have had time to start.
-            self._get_robot()
             self._refresh_parameter_values()
+            self._get_robot()
             self._apply_volume(0 if self._muted else self._volume)
-            self._online_ok = self._check_network()
             self._push_ui_state()
         except Exception as exc:
             self.logger.error(f"activation failed: {exc.__class__.__name__}: {exc}")
@@ -304,23 +255,17 @@ class MusicPlayerAgent(AgentBase):
             self._generation += 1
             handle = self._handle
             self._handle = None
+        self._stop_event.set()
         if handle is not None:
-            self._cancel_handle_async(handle)
+            threading.Thread(target=self._settle, args=(handle,), daemon=True).start()
         self._save_settings()
         self._cleanup_cache()
 
     # ------------------------------------------------------------------
-    # UI construction
+    # UI construction (single local page)
     # ------------------------------------------------------------------
     def _icon(
-        self,
-        cid: str,
-        zh: str,
-        en: str,
-        icon: str,
-        callback,
-        sequence: int,
-        shortcut_id: str = "",
+        self, cid, zh, en, icon, callback, sequence, shortcut_id=""
     ) -> IconComponent:
         return IconComponent(
             cid,
@@ -332,15 +277,7 @@ class MusicPlayerAgent(AgentBase):
         )
 
     def _toggle(
-        self,
-        cid: str,
-        zh: str,
-        en: str,
-        icon: str,
-        state: bool,
-        callback,
-        sequence: int,
-        shortcut_id: str = "",
+        self, cid, zh, en, icon, state, callback, sequence, shortcut_id=""
     ) -> DefaultStateIconComponent:
         return DefaultStateIconComponent(
             cid,
@@ -352,195 +289,49 @@ class MusicPlayerAgent(AgentBase):
             display_sequence=sequence,
         )
 
-    def _status(self, cid: str, zh: str, en: str, sequence: int) -> PlaceholderComponent:
-        return PlaceholderComponent(
-            cid,
-            LocaleString(en, zh),
-            "res/music_note.png",
-            display_sequence=sequence,
-        )
-
-    def _active_page_id(self) -> str:
-        """Which page the App should show (API 10800+ page predicate)."""
-
-        with self._lock:
-            tab = self._tab
-            online_ok = self._online_ok
-        if tab == PAGE_ONLINE and online_ok:
-            return PAGE_ONLINE
-        return PAGE_LOCAL
-
     def _build_ui(self) -> None:
-        # API 10800+: the proxy asks us which page should be visible. The old
-        # register_page() form is deprecated and gets overridden by the default
-        # robot-state predicate ("AutoGeneralDampingOrPVTInactive"), which made
-        # the App fall back to an empty page.
-        self.page_proxy = ComponentStatePageProxy(
-            self, lambda _state=None: self._active_page_id()
-        )
+        self.page_proxy = ComponentStatePageProxy(self, lambda _s=None: PAGE_LOCAL)
 
-        # ---------------- local page ----------------
-        status = self._status("local_status", "未在播放", "Idle", 0)
+        status = PlaceholderComponent(
+            "local_status",
+            LocaleString("Idle", "未在播放"),
+            "res/music_note.png",
+            display_sequence=0,
+        )
+        prev_btn = self._icon("local_prev", "上一首", "Previous", "res/prev.png", self.on_prev, 1, shortcut_id="prev")
+        play_btn = self._toggle("local_play", "播放", "Play", "res/play.png", False, self.on_play_pause, 2, shortcut_id="play_pause")
+        next_btn = self._icon("local_next", "下一首", "Next", "res/next.png", self.on_next, 3, shortcut_id="next")
+        mode_btn = self._icon("local_mode", "播放模式", "Play mode", "res/mode_order.png", self.on_cycle_mode, 4, shortcut_id="mode")
+        mute_btn = self._toggle("local_mute", "静音", "Mute", "res/mute.png", False, self.on_mute, 5, shortcut_id="mute")
+        vol_down = self._icon("local_vol_down", "音量 -", "Volume -", "res/vol_down.png", self.on_volume_down, 6)
+        vol_up = self._icon("local_vol_up", "音量 +", "Volume +", "res/vol_up.png", self.on_volume_up, 7)
+        scan_btn = self._icon("local_scan", "刷新歌单", "Rescan", "res/scan.png", self.on_scan, 8)
+
         self._ui["local_status"] = status
-
-        back = self._icon(
-            "local_tab_online", "在线音乐", "Online", "res/tab_online.png",
-            self.on_tab_online, 1,
-        )
-        prev_btn = self._icon(
-            "local_prev", "上一首", "Previous", "res/prev.png",
-            self.on_prev, 2, shortcut_id="prev",
-        )
-        play_btn = self._toggle(
-            "local_play", "播放", "Play", "res/play.png", False,
-            self.on_play_pause, 3, shortcut_id="play_pause",
-        )
-        next_btn = self._icon(
-            "local_next", "下一首", "Next", "res/next.png",
-            self.on_next, 4, shortcut_id="next",
-        )
-        mode_btn = self._icon(
-            "local_mode", "播放模式", "Play mode", "res/mode_order.png",
-            self.on_cycle_mode, 5, shortcut_id="mode",
-        )
-        mute_btn = self._toggle(
-            "local_mute", "静音", "Mute", "res/mute.png", False,
-            self.on_mute, 6, shortcut_id="mute",
-        )
-        scan_btn = self._icon(
-            "local_scan", "刷新歌单", "Rescan", "res/scan.png",
-            self.on_scan, 7,
-        )
-        self._ui["local_tab_online"] = back
         self._ui["local_prev"] = prev_btn
         self._ui["local_play"] = play_btn
         self._ui["local_next"] = next_btn
         self._ui["local_mode"] = mode_btn
         self._ui["local_mute"] = mute_btn
+        self._ui["local_vol_down"] = vol_down
+        self._ui["local_vol_up"] = vol_up
         self._ui["local_scan"] = scan_btn
 
         self.page_proxy.register_component_v2(PAGE_LOCAL, status)
         self.page_proxy.register_components(
             PAGE_LOCAL,
-            [back, prev_btn, play_btn, next_btn, mode_btn, mute_btn, scan_btn],
-        )
-
-        # ---------------- online page ----------------
-        o_status = self._status("online_status", "无网络", "Offline", 0)
-        o_back = self._icon(
-            "online_tab_local", "本地音乐", "Local", "res/tab_local.png",
-            self.on_tab_local, 1,
-        )
-        o_search = self._icon(
-            "online_search", "搜索", "Search", "res/search.png",
-            self.on_search, 2,
-        )
-        o_url = self._icon(
-            "online_play_url", "播放直链", "Play URL", "res/link.png",
-            self.on_play_url, 3,
-        )
-        o_prev = self._icon(
-            "online_prev", "上一首", "Previous", "res/prev.png",
-            self.on_prev, 4,
-        )
-        o_play = self._toggle(
-            "online_play", "播放", "Play", "res/play.png", False,
-            self.on_play_pause, 5, shortcut_id="play_pause",
-        )
-        o_next = self._icon(
-            "online_next", "下一首", "Next", "res/next.png",
-            self.on_next, 6, shortcut_id="next",
-        )
-        o_mute = self._toggle(
-            "online_mute", "静音", "Mute", "res/mute.png", False,
-            self.on_mute, 7, shortcut_id="mute",
-        )
-        self._ui["online_status"] = o_status
-        self._ui["online_tab_local"] = o_back
-        self._ui["online_search"] = o_search
-        self._ui["online_play_url"] = o_url
-        self._ui["online_prev"] = o_prev
-        self._ui["online_play"] = o_play
-        self._ui["online_next"] = o_next
-        self._ui["online_mute"] = o_mute
-
-        self.page_proxy.register_component_v2(PAGE_ONLINE, o_status)
-        self.page_proxy.register_components(
-            PAGE_ONLINE,
-            [o_back, o_search, o_url, o_prev, o_play, o_next, o_mute],
+            [prev_btn, play_btn, next_btn, mode_btn, mute_btn, vol_down, vol_up, scan_btn],
         )
 
     # ------------------------------------------------------------------
     # Parameters
     # ------------------------------------------------------------------
-    # ------------------------------------------------------------------
-    # Volume (panel buttons + parameter slider stay in sync)
-    # ------------------------------------------------------------------
-    def _add_volume_buttons(self) -> None:
-        for page, prefix in ((PAGE_LOCAL, "local"), (PAGE_ONLINE, "online")):
-            down = self._icon(
-                f"{prefix}_vol_down",
-                "音量 -",
-                "Volume -",
-                "res/vol_down.png",
-                self.on_volume_down,
-                8,
-            )
-            up = self._icon(
-                f"{prefix}_vol_up",
-                "音量 +",
-                "Volume +",
-                "res/vol_up.png",
-                self.on_volume_up,
-                9,
-            )
-            self._ui[f"{prefix}_vol_down"] = down
-            self._ui[f"{prefix}_vol_up"] = up
-            self.page_proxy.register_components(page, [down, up])
-
-    def on_volume_up(self, component: Component) -> Optional[LocaleString]:
-        return self._bump_volume(VOLUME_STEP_PERCENT)
-
-    def on_volume_down(self, component: Component) -> Optional[LocaleString]:
-        return self._bump_volume(-VOLUME_STEP_PERCENT)
-
-    def _bump_volume(self, delta: int) -> Optional[LocaleString]:
-        with self._lock:
-            target = max(0, min(100, int(self._volume) + delta))
-            self._volume = target
-            if target > 0:
-                self._last_nonzero_volume = target
-                self._muted = False
-            muted = self._muted
-        self._apply_volume(0 if muted else target)
-        self._write_param("volume", target)
-        if muted:
-            self._write_param("mute", False)
-        self._save_settings()
-        self._push_ui_state()
-        return LocaleString(f"Volume {target}%", f"音量 {target}%")
-
     def _register_parameter_callbacks(self) -> None:
         pm = self.parameter_manager
         pm.add_parameter_callback("volume", self._on_volume_param)
         pm.add_parameter_callback("mute", self._on_mute_param)
         pm.add_parameter_callback("seek_percent", self._on_seek_param)
         pm.add_parameter_callback("play_mode", self._on_mode_param)
-        pm.add_parameter_callback("search_keyword", self._on_keyword_param)
-        pm.add_parameter_callback("online_url", self._on_url_param)
-
-    def _read_param(self, name: str) -> Any:
-        try:
-            param = self.parameter_manager.get_parameter(name)
-            if name == "volume":
-                return param.as_int()
-            if name == "mute":
-                return param.as_bool()
-            if name == "seek_percent":
-                return param.as_float()
-            return param.as_string()
-        except Exception:
-            return None
 
     def _write_param(self, name: str, value: Any) -> None:
         try:
@@ -556,7 +347,6 @@ class MusicPlayerAgent(AgentBase):
 
     def _on_volume_param(self, param) -> None:
         if not self._params_ready:
-            # Startup default push from the schema; the loaded setting wins.
             return
         try:
             value = max(0, min(100, int(param.as_int())))
@@ -572,7 +362,6 @@ class MusicPlayerAgent(AgentBase):
                 self._muted = False
         self._apply_volume(value)
         if was_muted:
-            # Keep the parameter page in sync with the mute button.
             self._write_param("mute", False)
         self._save_settings()
         self._push_ui_state()
@@ -622,78 +411,21 @@ class MusicPlayerAgent(AgentBase):
         self._save_settings()
         self._push_ui_state()
 
-    def _on_keyword_param(self, param) -> None:
-        try:
-            self._params["search_keyword"] = str(param.as_string())
-        except Exception:
-            pass
-
-    def _on_url_param(self, param) -> None:
-        try:
-            self._params["online_url"] = str(param.as_string())
-        except Exception:
-            pass
-
-    def _get_robot(self) -> Optional[BoosterRobot]:
-        """Return a ready BoosterRobot, retrying while services come up."""
-
-        with self._robot_lock:
-            if self.robot is not None:
-                return self.robot
-            try:
-                self.robot = BoosterRobot()
-                self.logger.info("BoosterRobot ready")
-            except Exception as exc:
-                self.robot = None
-                self.logger.warn(
-                    f"BoosterRobot init failed (will retry): "
-                    f"{exc.__class__.__name__}: {exc}"
-                )
-            return self.robot
-
-    def _apply_volume(self, value_percent: int, persist: bool = True) -> None:
-        """Map 0..100 onto the K1 system volume (0.0..1.0)."""
-
+    def _apply_volume(self, value_percent: int) -> None:
         target = max(0.0, min(1.0, float(value_percent) / 100.0))
+        robot = self._get_robot()
+        if robot is None:
+            self.logger.warn(f"volume not applied (robot sdk not ready): {value_percent}%")
+            return
         try:
-            robot = self._get_robot()
-            if robot is None:
-                raise RuntimeError("robot sdk not ready")
             robot.audio_manager.set_system_volume(target)
+            self.logger.info(f"system volume -> {value_percent}%")
         except Exception as exc:
             self.logger.warn(f"set_system_volume({target:.2f}) failed: {exc}")
-        if persist:
-            self.logger.info(f"system volume -> {value_percent}%")
 
     # ------------------------------------------------------------------
-    # Tab / mode / mute handlers
+    # Handlers
     # ------------------------------------------------------------------
-    def on_tab_online(self, component: Component) -> Optional[LocaleString]:
-        if not self._online_ok:
-            return LocaleString(
-                {"en": "No network, online tab disabled", "zh": "网络不可用，在线音乐已禁用"}
-            )
-        with self._lock:
-            self._tab = PAGE_ONLINE
-        self._use_playlist(PAGE_ONLINE)
-        try:
-            self._force_update()
-        except Exception:
-            pass
-        self._push_ui_state()
-        return LocaleString("Online music", "在线音乐")
-
-    def on_tab_local(self, component: Component) -> Optional[LocaleString]:
-        with self._lock:
-            self._tab = PAGE_LOCAL
-        self._use_playlist(PAGE_LOCAL)
-        try:
-            self._force_update()
-        except Exception:
-            pass
-        self._push_ui_state()
-        return LocaleString("Local music", "本地音乐")
-
     def on_cycle_mode(self, component: Component) -> Optional[LocaleString]:
         with self._lock:
             idx = MODES.index(self._mode) if self._mode in MODES else 0
@@ -703,12 +435,7 @@ class MusicPlayerAgent(AgentBase):
         self._write_param("play_mode", mode)
         self._save_settings()
         self._push_ui_state()
-        return LocaleString(
-            {
-                "en": f"Mode: {self._mode_text(mode, 'en')}",
-                "zh": f"播放模式：{self._mode_text(mode, 'zh')}",
-            }
-        )
+        return LocaleString(f"Mode: {self._mode_text(mode, 'en')}", f"播放模式：{self._mode_text(mode, 'zh')}")
 
     @staticmethod
     def _mode_text(mode: str, lang: str) -> str:
@@ -728,34 +455,45 @@ class MusicPlayerAgent(AgentBase):
         self._write_param("mute", muted)
         self._save_settings()
         self._push_ui_state()
-        return LocaleString(
-            {"en": "Muted" if muted else "Unmuted", "zh": "已静音" if muted else "已取消静音"}
-        )
+        return LocaleString("Muted" if muted else "Unmuted", "已静音" if muted else "已取消静音")
 
-    # ------------------------------------------------------------------
-    # Transport handlers (fast: only enqueue work)
-    # ------------------------------------------------------------------
+    def on_volume_up(self, component: Component) -> Optional[LocaleString]:
+        return self._bump_volume(VOLUME_STEP_PERCENT)
+
+    def on_volume_down(self, component: Component) -> Optional[LocaleString]:
+        return self._bump_volume(-VOLUME_STEP_PERCENT)
+
+    def _bump_volume(self, delta: int) -> Optional[LocaleString]:
+        with self._lock:
+            target = max(0, min(100, int(self._volume) + delta))
+            self._volume = target
+            if target > 0:
+                self._last_nonzero_volume = target
+                self._muted = False
+            muted = self._muted
+        self._apply_volume(0 if muted else target)
+        self._write_param("volume", target)
+        if muted:
+            self._write_param("mute", False)
+        self._save_settings()
+        self._push_ui_state()
+        return LocaleString(f"Volume {target}%", f"音量 {target}%")
+
     def on_play_pause(self, component: Component) -> Optional[LocaleString]:
         with self._lock:
             track = self._current
             paused = self._paused
             playing = self._handle is not None and not paused
         if track is None:
-            # Nothing loaded yet: play the current tab's first item.
             if not self._tracks:
-                # A start that never activated leaves the list empty; rescan once
-                # instead of staying stuck on an empty playlist forever.
                 self._scan_local(refresh_ui=False)
             if not self._tracks:
-                return LocaleString(
-                    {"en": "Playlist is empty", "zh": "播放列表为空，请先添加音乐"}
-                )
+                return LocaleString("Playlist is empty", "播放列表为空，请先添加音乐")
             with self._lock:
                 self._index = 0 if self._index < 0 else self._index
                 track = self._tracks[self._index]
             self._start_playback(track, 0.0)
             return LocaleString("Playing", "开始播放")
-
         if playing:
             self._pause()
             return LocaleString("Paused", "已暂停")
@@ -781,31 +519,7 @@ class MusicPlayerAgent(AgentBase):
 
     def _scan_and_report(self) -> None:
         count = self._scan_local(refresh_ui=True)
-        self._toast_pending = LocaleString(
-            {
-                "en": f"Found {count} local track(s)",
-                "zh": f"本地音乐扫描完成，共 {count} 首",
-            }
-        )
-
-    # ------------------------------------------------------------------
-    # Playlist selection
-    # ------------------------------------------------------------------
-    def _use_playlist(self, page: str) -> None:
-        """Switch the active playlist to the one owned by ``page``."""
-
-        with self._lock:
-            target = self._online_tracks if page == PAGE_ONLINE else self._local_tracks
-            self._tracks = list(target)
-            current = self._current
-            index = -1
-            if current is not None:
-                for position, track in enumerate(self._tracks):
-                    if track.location == current.location:
-                        index = position
-                        break
-            self._index = index
-            self._shuffle_bag = []
+        self._toast_pending = LocaleString(f"Found {count} local track(s)", f"本地音乐扫描完成，共 {count} 首")
 
     # ------------------------------------------------------------------
     # Playlist
@@ -818,17 +532,9 @@ class MusicPlayerAgent(AgentBase):
                 continue
             try:
                 for path in self._iter_audio_files(base, MAX_SCAN_DEPTH):
-                    found.append(
-                        Track(
-                            title=path.stem,
-                            source="local",
-                            location=str(path),
-                            duration=0.0,
-                        )
-                    )
+                    found.append(Track(title=path.stem, location=str(path), duration=0.0))
             except Exception as exc:
                 self.logger.warn(f"scan {base} failed: {exc}")
-        # de-duplicate by path, keep order
         seen: set[str] = set()
         unique: list[Track] = []
         for track in found:
@@ -836,15 +542,11 @@ class MusicPlayerAgent(AgentBase):
                 continue
             seen.add(track.location)
             unique.append(track)
-
         with self._lock:
-            self._local_tracks = unique
-            if self._tab == PAGE_LOCAL or not self._tracks:
-                self._tracks = list(unique)
-                if self._index >= len(unique):
-                    self._index = -1
-                self._shuffle_bag = []
-                self._tab = PAGE_LOCAL
+            self._tracks = unique
+            if self._index >= len(unique):
+                self._index = -1
+            self._shuffle_bag = []
         self.logger.info(f"local scan: {len(unique)} track(s) under {root}")
         if refresh_ui:
             self._push_ui_state()
@@ -871,120 +573,8 @@ class MusicPlayerAgent(AgentBase):
                     continue
 
     # ------------------------------------------------------------------
-    # Online search
-    # ------------------------------------------------------------------
-    def on_search(self, component: Component) -> Optional[LocaleString]:
-        keyword = str(self._params.get("search_keyword", "") or "").strip()
-        if not keyword:
-            return LocaleString(
-                {"en": "Enter a keyword in the parameter page first", "zh": "请先在参数页填写搜索关键词"}
-            )
-        if not self._online_ok:
-            return LocaleString("No network", "网络异常，无法搜索")
-        threading.Thread(target=self._search_worker, args=(keyword,), daemon=True).start()
-        return LocaleString("Searching...", "正在搜索...")
-
-    def _search_worker(self, keyword: str) -> None:
-        try:
-            query = urllib.parse.urlencode(
-                {"s": keyword, "type": "1", "limit": MAX_ONLINE_RESULTS}
-            )
-            request = urllib.request.Request(
-                f"{NETEASE_SEARCH_URL}?{query}", headers=NETEASE_HEADERS
-            )
-            with urllib.request.urlopen(request, timeout=12) as response:
-                payload = json.loads(response.read().decode("utf-8", "replace"))
-
-            songs = ((payload.get("result") or {}).get("songs")) or []
-            results: list[Track] = []
-            for item in songs:
-                song_id = item.get("id")
-                if not song_id:
-                    continue
-                artists = item.get("artists") or []
-                artist = str(artists[0].get("name") or "") if artists else ""
-                results.append(
-                    Track(
-                        title=str(item.get("name") or "Unknown"),
-                        artist=artist,
-                        source="online",
-                        location=f"netease:{song_id}",
-                        duration=float(item.get("duration") or 0) / 1000.0,
-                    )
-                )
-            if not results:
-                self._toast_pending = LocaleString(
-                    "No playable song found", "没有找到可播放的歌曲"
-                )
-                return
-            with self._lock:
-                self._online_tracks = results
-                self._search_results = results
-                self._tab = PAGE_ONLINE
-            self._use_playlist(PAGE_ONLINE)
-            self._toast_pending = LocaleString(
-                f"Found {len(results)} song(s), press play",
-                f"找到 {len(results)} 首，按播放开始",
-            )
-            try:
-                self._force_update()
-            except Exception:
-                pass
-            self._push_ui_state()
-        except Exception as exc:
-            self.logger.warn(f"search failed: {exc.__class__.__name__}: {exc}")
-            self._online_ok = self._check_network()
-            self._toast_pending = LocaleString(
-                "Search failed, check network", "搜索失败，请检查网络"
-            )
-            self._push_ui_state()
-
-    def on_play_url(self, component: Component) -> Optional[LocaleString]:
-        url = str(self._params.get("online_url", "") or "").strip()
-        if not re.match(r"^https?://", url, re.IGNORECASE):
-            return LocaleString(
-                {"en": "Set a valid http(s) URL in the parameter page", "zh": "请先在参数页填写有效的 http(s) 音频直链"}
-            )
-        if not self._online_ok:
-            return LocaleString("No network", "网络异常，无法播放在线音频")
-        track = Track(
-            title=os.path.basename(urllib.parse.urlparse(url).path) or "Online audio",
-            source="online",
-            location=url,
-        )
-        with self._lock:
-            self._online_tracks = [track]
-            self._tab = PAGE_ONLINE
-        self._start_playback(track, 0.0)
-        self._use_playlist(PAGE_ONLINE)
-        return LocaleString("Loading URL...", "正在加载音频直链...")
-
-    # ------------------------------------------------------------------
     # Playback engine
     # ------------------------------------------------------------------
-    def _current_track(self) -> Optional[Track]:
-        with self._lock:
-            if 0 <= self._index < len(self._tracks):
-                return self._tracks[self._index]
-        return self._current
-
-    def _cancel_handle_async(self, handle) -> None:
-        """Cancel an audio handle on a background thread.
-
-        handle.cancel() blocks inside the SDK player (it waits for the player
-        state callback, which is a Python callback that needs the GIL). Calling
-        it from the click callback thread deadlocks. Run it off-thread instead.
-        """
-
-        def _do() -> None:
-            try:
-                handle.cancel()
-                handle.wait(timeout=5.0)
-            except Exception as exc:
-                self.logger.warn(f"async cancel failed: {exc}")
-
-        threading.Thread(target=_do, daemon=True).start()
-
     def _start_playback(self, track: Track, offset: float) -> None:
         with self._lock:
             self._generation += 1
@@ -997,8 +587,7 @@ class MusicPlayerAgent(AgentBase):
             self._offset = max(0.0, offset)
             self._started_at = 0.0
             self._duration = float(track.duration or 0.0)
-        # The previous handle is cancelled inside the worker, not here:
-        # cancel() deadlocks the SDK player state callback on this thread.
+        self._stop_event.clear()
         threading.Thread(
             target=self._play_worker,
             args=(generation, track, max(0.0, offset), previous),
@@ -1010,33 +599,28 @@ class MusicPlayerAgent(AgentBase):
         with self._lock:
             return (not self._shutdown) and self._generation == generation
 
-    def _play_worker(
-        self,
-        generation: int,
-        track: Track,
-        offset: float,
-        previous_handle=None,
-    ) -> None:
+    def _settle(self, handle) -> None:
+        """Cancel and wait for a handle to reach a terminal state (off-thread)."""
+
+        try:
+            handle.cancel()
+            handle.wait(timeout=HANDLE_SETTLE_TIMEOUT_SEC)
+        except Exception as exc:
+            self.logger.warn(f"settle handle failed: {exc}")
+
+    def _play_worker(self, generation, track, offset, previous_handle) -> None:
         try:
             if previous_handle is not None:
-                # Settle the previous audio task so play_sound is not rejected
-                # by the mutual-exclusion rule. Runs on this worker thread.
-                try:
-                    previous_handle.cancel()
-                    previous_handle.wait(timeout=5.0)
-                except Exception:
-                    pass
+                self._settle(previous_handle)
             source = self._prepare_source(track, offset)
             if source is None:
-                raise RuntimeError("format not supported or file damaged")
+                raise RuntimeError("source unavailable")
             if not self._is_current(generation):
                 return
 
             duration = float(track.duration or 0.0)
             if duration <= 0:
                 duration = self._probe_duration(source)
-                if duration <= 0 and track.source == "local":
-                    duration = self._probe_duration(track.location)
                 with self._lock:
                     if self._generation == generation:
                         self._duration = duration
@@ -1056,17 +640,29 @@ class MusicPlayerAgent(AgentBase):
                     self._offset = offset
                     self._loading = False
             if stale:
-                try:
-                    handle.cancel()
-                except Exception:
-                    pass
+                self._settle(handle)
                 return
 
             self._push_ui_state()
-            try:
-                handle.wait(timeout=duration + PLAYBACK_EXTRA_TIMEOUT_SEC)
-            except Exception as exc:
-                self.logger.warn(f"wait playback failed: {exc}")
+
+            # Poll so pause/stop can interrupt without cancelling on the
+            # callback thread.
+            while True:
+                with self._lock:
+                    if self._generation != generation or self._shutdown:
+                        return
+                if self._stop_event.is_set():
+                    break
+                if handle.done():
+                    break
+                handle.wait(timeout=0.25)
+
+            if self._stop_event.is_set():
+                with self._lock:
+                    self._handle = None
+                self._settle(handle)
+                return
+
             self._on_track_finished(generation)
         except Exception as exc:
             self.logger.error(
@@ -1078,102 +674,18 @@ class MusicPlayerAgent(AgentBase):
                     self._loading = False
             if current:
                 self._toast_pending = LocaleString(
-                    {
-                        "en": "Cannot play: invalid link / damaged file / unsupported format",
-                        "zh": "无法播放：链接失效 / 文件损坏 / 格式不支持",
-                    }
+                    "Cannot play: damaged file / unsupported format",
+                    "无法播放：文件损坏 / 格式不支持",
                 )
                 self._push_ui_state()
 
     def _prepare_source(self, track: Track, offset: float) -> Optional[Path]:
-        """Return a local file that robot.play_sound() can play.
-
-        play_sound() only accepts local paths, so remote tracks are resolved to
-        a direct mp3 URL and downloaded to the cache first. Local files at
-        offset 0 are played directly; anything needing a non-zero offset is
-        transcoded to PCM wav with ffmpeg (play_sound has no seek).
-        """
-
-        path = self._local_source_path(track)
-        if path is None:
+        path = Path(track.location)
+        if not path.is_file():
             return None
         if offset <= 0.01:
             return path
         return self._transcode(str(path), offset)
-
-    def _local_source_path(self, track: Track) -> Optional[Path]:
-        if track.source == "local":
-            path = Path(track.location)
-            return path if path.is_file() else None
-
-        url = self._resolve_online_url(track)
-        if not url:
-            self.logger.warn(f"no playable url: {track.title}")
-            return None
-        cache = self._storage_root / self._cache_dir
-        try:
-            cache.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            return None
-        digest = hashlib.md5(track.location.encode("utf-8")).hexdigest()[:12]
-        dest = cache / f"online_{digest}.mp3"
-        if dest.is_file() and dest.stat().st_size > 4096:
-            return dest
-        if not self._download(url, dest):
-            return None
-        return dest
-
-    def _resolve_online_url(self, track: Track) -> Optional[str]:
-        """Turn a track reference into a directly downloadable mp3 URL."""
-
-        if not track.location.startswith("netease:"):
-            # Already a plain http(s) URL provided by the user.
-            return track.location if track.location.startswith("http") else None
-        song_id = track.location.split(":", 1)[1].strip()
-        if not song_id:
-            return None
-        query = urllib.parse.urlencode({"ids": f"[{song_id}]", "br": "320000"})
-        request = urllib.request.Request(
-            f"{NETEASE_SONG_URL}?{query}", headers=NETEASE_HEADERS
-        )
-        with urllib.request.urlopen(request, timeout=12) as response:
-            payload = json.loads(response.read().decode("utf-8", "replace"))
-        items = payload.get("data") or []
-        if not items:
-            return None
-        url = items[0].get("url")
-        if not url:
-            return None
-        return str(url).replace("http://", "https://", 1)
-
-    def _download(self, url: str, dest: Path) -> bool:
-        try:
-            request = urllib.request.Request(url, headers=NETEASE_HEADERS)
-            with urllib.request.urlopen(
-                request, timeout=ONLINE_DOWNLOAD_TIMEOUT_SEC
-            ) as response, open(dest, "wb") as handle:
-                total = 0
-                while True:
-                    chunk = response.read(64 * 1024)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total > MAX_DOWNLOAD_BYTES:
-                        raise RuntimeError("audio file too large")
-                    handle.write(chunk)
-            if dest.is_file() and dest.stat().st_size > 4096:
-                self.logger.info(
-                    f"downloaded {total // 1024} KB -> {dest.name}"
-                )
-                return True
-            return False
-        except Exception as exc:
-            self.logger.warn(f"download failed: {exc.__class__.__name__}: {exc}")
-            try:
-                dest.unlink()
-            except OSError:
-                pass
-            return False
 
     def _ffmpeg(self) -> Optional[str]:
         return shutil.which("ffmpeg")
@@ -1181,21 +693,16 @@ class MusicPlayerAgent(AgentBase):
     def _transcode(self, source: str, offset: float) -> Optional[Path]:
         ffmpeg = self._ffmpeg()
         if ffmpeg is None:
-            # No ffmpeg (e.g. the simulator image): seeking is impossible, but a
-            # local file can still be played from the beginning. Resume/seek
-            # therefore degrade to "restart the track" instead of failing with a
-            # misleading "damaged file" toast.
-            if not str(source).lower().startswith("http"):
-                path = Path(source)
-                if path.is_file():
-                    if offset > 0.01:
-                        self.logger.warn(
-                            "ffmpeg missing; restarting the track from the "
-                            "beginning instead of seeking"
-                        )
-                    return path
+            # No ffmpeg: cannot seek, but can restart the track from the start.
+            path = Path(source)
+            if path.is_file():
+                if offset > 0.01:
+                    self.logger.warn(
+                        "ffmpeg missing; restarting the track from the beginning "
+                        "instead of seeking"
+                    )
+                return path
             return None
-
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         target = self._cache_dir / "current_track.wav"
         command = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
@@ -1221,9 +728,6 @@ class MusicPlayerAgent(AgentBase):
             detail = (exc.stderr or b"").decode("utf-8", "replace")[:300]
             self.logger.warn(f"ffmpeg transcode failed: {detail}")
             return None
-        except subprocess.TimeoutExpired:
-            self.logger.warn("ffmpeg transcode timed out")
-            return None
         except Exception as exc:
             self.logger.warn(f"ffmpeg transcode error: {exc}")
             return None
@@ -1231,9 +735,7 @@ class MusicPlayerAgent(AgentBase):
             return target
         return None
 
-    def _probe_duration(self, path: Any) -> float:
-        """Read track duration by asking ffmpeg for the stream info."""
-
+    def _probe_duration(self, path) -> float:
         ffmpeg = self._ffmpeg()
         if ffmpeg is None:
             return 0.0
@@ -1253,33 +755,29 @@ class MusicPlayerAgent(AgentBase):
             self.logger.warn(f"probe duration failed: {exc}")
         return 0.0
 
-    def _position(self) -> float:
-        with self._lock:
-            if self._handle is None or self._paused:
-                return self._offset
-            elapsed = time.monotonic() - self._started_at
-            position = self._offset + max(0.0, elapsed)
-            if self._duration > 0:
-                return min(self._duration, position)
-            return position
+    def _position_locked(self) -> float:
+        if self._handle is None or self._paused:
+            return self._offset
+        elapsed = time.monotonic() - self._started_at
+        position = self._offset + max(0.0, elapsed)
+        if self._duration > 0:
+            return min(self._duration, position)
+        return position
 
     def _seek_percent(self) -> float:
         with self._lock:
             duration = self._duration
         if duration <= 0:
             return 0.0
-        return max(0.0, min(100.0, self._position() / duration * 100.0))
+        return max(0.0, min(100.0, self._position_locked() / duration * 100.0))
 
     def _pause(self) -> None:
         with self._lock:
-            position = self._position()
-            self._generation += 1
-            handle = self._handle
-            self._handle = None
+            if self._handle is None or self._paused:
+                return
             self._paused = True
-            self._offset = position
-        if handle is not None:
-            self._cancel_handle_async(handle)
+            self._offset = self._position_locked()
+        self._stop_event.set()
         self._push_ui_state()
 
     def _seek_to(self, position: float) -> None:
@@ -1300,7 +798,7 @@ class MusicPlayerAgent(AgentBase):
             self._offset = 0.0
             mode = self._mode
         if mode == MODE_REPEAT_ONE:
-            track = self._current_track()
+            track = self._current
             if track is not None:
                 self._start_playback(track, 0.0)
                 return
@@ -1309,9 +807,7 @@ class MusicPlayerAgent(AgentBase):
     def _advance(self, step: int, manual: bool) -> None:
         with self._lock:
             if not self._tracks:
-                self._toast_pending = LocaleString(
-                    {"en": "Playlist is empty", "zh": "播放列表为空"}
-                )
+                self._toast_pending = LocaleString("Playlist is empty", "播放列表为空")
                 return
             total = len(self._tracks)
             mode = self._mode
@@ -1330,7 +826,6 @@ class MusicPlayerAgent(AgentBase):
                     if manual:
                         next_index = 0
                     else:
-                        # Sequential mode: stop at the end of the list.
                         self._index = total - 1
                         self._stop_internal()
                         return
@@ -1345,56 +840,11 @@ class MusicPlayerAgent(AgentBase):
     def _stop_internal(self) -> None:
         with self._lock:
             self._generation += 1
-            handle = self._handle
             self._handle = None
             self._paused = False
             self._offset = 0.0
             self._current = None
-        if handle is not None:
-            self._cancel_handle_async(handle)
         self._push_ui_state()
-
-    def _force_update(self) -> None:
-        """Re-evaluate the active page, serialized with other framework calls."""
-
-        try:
-            with self._ui_lock:
-                self.page_proxy.force_update()
-        except Exception as exc:
-            self.logger.warn(f"force_update failed: {exc}")
-
-    # ------------------------------------------------------------------
-    # Network supervision
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _check_network() -> bool:
-        for host, port in NETWORK_PROBES:
-            try:
-                with socket.create_connection((host, port), timeout=NETWORK_TIMEOUT_SEC):
-                    return True
-            except OSError:
-                continue
-        return False
-
-    def _network_watcher(self) -> None:
-        while not self._shutdown:
-            time.sleep(NETWORK_CHECK_INTERVAL_SEC)
-            if self._shutdown:
-                return
-            reachable = self._check_network()
-            changed = reachable != self._online_ok
-            self._online_ok = reachable
-            if not reachable:
-                with self._lock:
-                    if self._tab == PAGE_ONLINE:
-                        self._tab = PAGE_LOCAL
-                        changed = True
-            if changed:
-                try:
-                    self._force_update()
-                except Exception:
-                    pass
-                self._push_ui_state()
 
     # ------------------------------------------------------------------
     # UI refresh
@@ -1425,7 +875,7 @@ class MusicPlayerAgent(AgentBase):
         if loading:
             prefix = "…"
         total = duration if duration > 0 else (track.duration or 0.0)
-        position = self._position()
+        position = self._position_locked()
         counter = f"{index + 1}/{len(tracks)}" if tracks and index >= 0 else "-"
         return f"{prefix} {counter} {track.title[:16]}  {_fmt_time(position)}/{_fmt_time(total)}"
 
@@ -1445,21 +895,12 @@ class MusicPlayerAgent(AgentBase):
                 self.logger.warn(f"publish toast failed: {exc}")
 
         text = self._status_text()
-        active = self._active_page_id()
-        status_key = "local_status" if active == PAGE_LOCAL else "online_status"
         if text != self._last_status_text:
             self._last_status_text = text
-            for key in ("local_status", "online_status"):
-                component = self._ui.get(key)
-                if component is None:
-                    continue
-                try:
-                    component.name = LocaleString(text, text)
-                except Exception as exc:
-                    self.logger.warn(f"set text {key} failed: {exc}")
-            component = self._ui.get(status_key)
+            component = self._ui.get("local_status")
             if component is not None:
                 try:
+                    component.name = LocaleString(text, text)
                     self.component_manager.update_component(component)
                 except Exception as exc:
                     self.logger.warn(f"update status failed: {exc}")
@@ -1470,20 +911,8 @@ class MusicPlayerAgent(AgentBase):
             muted = self._muted
             mode = self._mode
         self._set_toggle("local_play", playing, loading)
-        self._set_toggle("online_play", playing, loading)
         self._set_toggle("local_mute", muted)
-        self._set_toggle("online_mute", muted)
         self._set_icon("local_mode", self._mode_icon(mode), self._mode_text(mode, "zh"))
-
-    def _is_active_key(self, key: str) -> bool:
-        """Only components of the visible page exist in the App's list."""
-
-        active = self._active_page_id()
-        if key.startswith("local_"):
-            return active == PAGE_LOCAL
-        if key.startswith("online_"):
-            return active == PAGE_ONLINE
-        return True
 
     def _set_toggle(self, key: str, state: bool, loading: bool = False) -> None:
         component = self._ui.get(key)
@@ -1497,9 +926,7 @@ class MusicPlayerAgent(AgentBase):
                 component.set_selection_ring_loading(loading)
             except Exception:
                 pass
-            # Components on an inactive page are not in the App's component list;
-            # updating them only produces "not found in component list" warnings.
-            if self._is_active_key(key) and (changed or loading):
+            if changed or loading:
                 self.component_manager.update_component(component)
         except Exception as exc:
             self.logger.warn(f"set toggle {key} failed: {exc}")
@@ -1512,8 +939,7 @@ class MusicPlayerAgent(AgentBase):
             if getattr(component, "path", "") != icon_path:
                 component.path = icon_path
                 component.name = LocaleString(zh_name, zh_name)
-                if self._is_active_key(key):
-                    self.component_manager.update_component(component)
+                self.component_manager.update_component(component)
         except Exception as exc:
             self.logger.warn(f"set icon {key} failed: {exc}")
 

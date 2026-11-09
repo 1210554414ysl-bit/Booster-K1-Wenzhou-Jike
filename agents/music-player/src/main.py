@@ -305,10 +305,7 @@ class MusicPlayerAgent(AgentBase):
             handle = self._handle
             self._handle = None
         if handle is not None:
-            try:
-                handle.cancel()
-            except Exception:
-                pass
+            self._cancel_handle_async(handle)
         self._save_settings()
         self._cleanup_cache()
 
@@ -971,6 +968,23 @@ class MusicPlayerAgent(AgentBase):
                 return self._tracks[self._index]
         return self._current
 
+    def _cancel_handle_async(self, handle) -> None:
+        """Cancel an audio handle on a background thread.
+
+        handle.cancel() blocks inside the SDK player (it waits for the player
+        state callback, which is a Python callback that needs the GIL). Calling
+        it from the click callback thread deadlocks. Run it off-thread instead.
+        """
+
+        def _do() -> None:
+            try:
+                handle.cancel()
+                handle.wait(timeout=5.0)
+            except Exception as exc:
+                self.logger.warn(f"async cancel failed: {exc}")
+
+        threading.Thread(target=_do, daemon=True).start()
+
     def _start_playback(self, track: Track, offset: float) -> None:
         with self._lock:
             self._generation += 1
@@ -983,14 +997,11 @@ class MusicPlayerAgent(AgentBase):
             self._offset = max(0.0, offset)
             self._started_at = 0.0
             self._duration = float(track.duration or 0.0)
-        if previous is not None:
-            try:
-                previous.cancel()
-            except Exception:
-                pass
+        # The previous handle is cancelled inside the worker, not here:
+        # cancel() deadlocks the SDK player state callback on this thread.
         threading.Thread(
             target=self._play_worker,
-            args=(generation, track, max(0.0, offset)),
+            args=(generation, track, max(0.0, offset), previous),
             daemon=True,
         ).start()
         self._push_ui_state()
@@ -999,8 +1010,22 @@ class MusicPlayerAgent(AgentBase):
         with self._lock:
             return (not self._shutdown) and self._generation == generation
 
-    def _play_worker(self, generation: int, track: Track, offset: float) -> None:
+    def _play_worker(
+        self,
+        generation: int,
+        track: Track,
+        offset: float,
+        previous_handle=None,
+    ) -> None:
         try:
+            if previous_handle is not None:
+                # Settle the previous audio task so play_sound is not rejected
+                # by the mutual-exclusion rule. Runs on this worker thread.
+                try:
+                    previous_handle.cancel()
+                    previous_handle.wait(timeout=5.0)
+                except Exception:
+                    pass
             source = self._prepare_source(track, offset)
             if source is None:
                 raise RuntimeError("format not supported or file damaged")
@@ -1254,10 +1279,7 @@ class MusicPlayerAgent(AgentBase):
             self._paused = True
             self._offset = position
         if handle is not None:
-            try:
-                handle.cancel()
-            except Exception:
-                pass
+            self._cancel_handle_async(handle)
         self._push_ui_state()
 
     def _seek_to(self, position: float) -> None:
@@ -1329,10 +1351,7 @@ class MusicPlayerAgent(AgentBase):
             self._offset = 0.0
             self._current = None
         if handle is not None:
-            try:
-                handle.cancel()
-            except Exception:
-                pass
+            self._cancel_handle_async(handle)
         self._push_ui_state()
 
     def _force_update(self) -> None:

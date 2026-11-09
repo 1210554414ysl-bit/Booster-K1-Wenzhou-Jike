@@ -57,11 +57,15 @@
 ```
 Booster-K1-Wenzhou-Jike/
 ├── README.md                       # 本文件：仓库总览 + 快速开始
+├── CHANGELOG.md                    # 版本变更记录（与 git tag 对应）
 ├── docs/
 │   ├── 01-setup.md                 # 环境准备：Studio、固件、连接机器人
 │   ├── 02-install-agent.md         # 安装 Agent：一键安装 / .agent 分发
 │   ├── 03-develop-agent.md         # 开发自己的 K1 Agent
-│   └── 04-faq.md                   # 常见问题排查
+│   ├── 04-faq.md                   # 常见问题排查
+│   └── 05-versioning.md            # ⭐ 版本管理与回滚（装坏了怎么救）
+├── scripts/
+│   └── release.ps1                 # 一键发布：归档 .agent + 提交 + 打 tag
 ├── agents/
 │   ├── README.md                   # 新增 Agent 的目录约定与检查清单
 │   └── volume-adjustment/          # 音量调节 Agent

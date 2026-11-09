@@ -152,7 +152,12 @@ class MusicPlayerAgent(AgentBase):
                 param_schema_path="res/params/schema.json",
             )
         )
-        self.robot = BoosterRobot()
+        # BoosterRobot() can fail while the motion services are still
+        # starting (simulator boot, robot reboot). Never let that kill the
+        # agent: keep it lazy and retry on demand.
+        self._robot_lock = threading.RLock()
+        self.robot: Optional[BoosterRobot] = None
+        self._get_robot()
 
         # --- shared state -------------------------------------------------
         self._lock = threading.RLock()
@@ -279,6 +284,8 @@ class MusicPlayerAgent(AgentBase):
             self._refresh_parameter_values()
             time.sleep(PARAM_SETTLE_SEC)
             self._params_ready = True
+            # Retry the robot SDK now that services have had time to start.
+            self._get_robot()
             self._refresh_parameter_values()
             self._apply_volume(0 if self._muted else self._volume)
             self._online_ok = self._check_network()
@@ -626,12 +633,32 @@ class MusicPlayerAgent(AgentBase):
         except Exception:
             pass
 
+    def _get_robot(self) -> Optional[BoosterRobot]:
+        """Return a ready BoosterRobot, retrying while services come up."""
+
+        with self._robot_lock:
+            if self.robot is not None:
+                return self.robot
+            try:
+                self.robot = BoosterRobot()
+                self.logger.info("BoosterRobot ready")
+            except Exception as exc:
+                self.robot = None
+                self.logger.warn(
+                    f"BoosterRobot init failed (will retry): "
+                    f"{exc.__class__.__name__}: {exc}"
+                )
+            return self.robot
+
     def _apply_volume(self, value_percent: int, persist: bool = True) -> None:
         """Map 0..100 onto the K1 system volume (0.0..1.0)."""
 
         target = max(0.0, min(1.0, float(value_percent) / 100.0))
         try:
-            self.robot.audio_manager.set_system_volume(target)
+            robot = self._get_robot()
+            if robot is None:
+                raise RuntimeError("robot sdk not ready")
+            robot.audio_manager.set_system_volume(target)
         except Exception as exc:
             self.logger.warn(f"set_system_volume({target:.2f}) failed: {exc}")
         if persist:
@@ -986,7 +1013,10 @@ class MusicPlayerAgent(AgentBase):
                         self._duration = duration
                         track.duration = duration
 
-            handle = self.robot.play_sound(str(source))
+            robot = self._get_robot()
+            if robot is None:
+                raise RuntimeError("robot sdk not ready")
+            handle = robot.play_sound(str(source))
             with self._lock:
                 if self._generation != generation or self._shutdown:
                     stale = True
@@ -1122,9 +1152,19 @@ class MusicPlayerAgent(AgentBase):
     def _transcode(self, source: str, offset: float) -> Optional[Path]:
         ffmpeg = self._ffmpeg()
         if ffmpeg is None:
-            # No ffmpeg: only whole-file playback of a local mp3/wav is possible.
-            if offset <= 0.01 and not str(source).lower().startswith("http"):
-                return Path(source)
+            # No ffmpeg (e.g. the simulator image): seeking is impossible, but a
+            # local file can still be played from the beginning. Resume/seek
+            # therefore degrade to "restart the track" instead of failing with a
+            # misleading "damaged file" toast.
+            if not str(source).lower().startswith("http"):
+                path = Path(source)
+                if path.is_file():
+                    if offset > 0.01:
+                        self.logger.warn(
+                            "ffmpeg missing; restarting the track from the "
+                            "beginning instead of seeking"
+                        )
+                    return path
             return None
 
         self._cache_dir.mkdir(parents=True, exist_ok=True)

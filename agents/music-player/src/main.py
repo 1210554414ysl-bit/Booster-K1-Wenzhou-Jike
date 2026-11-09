@@ -20,6 +20,7 @@ network fetch, playback waiting) happens on worker threads.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -84,8 +85,20 @@ FFMPEG_PROBE_TIMEOUT_SEC = 20.0
 FFMPEG_TRANSCODE_TIMEOUT_SEC = 180.0
 PLAYBACK_EXTRA_TIMEOUT_SEC = 30.0
 
-ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
-NETWORK_PROBES = (("itunes.apple.com", 443), ("www.baidu.com", 443))
+NETEASE_SEARCH_URL = "https://music.163.com/api/search/get/web"
+NETEASE_SONG_URL = "https://music.163.com/api/song/enhance/player/url"
+NETEASE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120 Safari/537.36"
+    ),
+    "Referer": "https://music.163.com/",
+    "Accept": "*/*",
+}
+ONLINE_DOWNLOAD_TIMEOUT_SEC = 40.0
+MAX_DOWNLOAD_BYTES = 60 * 1024 * 1024
+VOLUME_STEP_PERCENT = 10
+NETWORK_PROBES = (("music.163.com", 443), ("www.baidu.com", 443))
 
 
 def _fmt_time(seconds: float) -> str:
@@ -185,6 +198,7 @@ class MusicPlayerAgent(AgentBase):
         self._ensure_dirs()
         self._load_settings()
         self._build_ui()
+        self._add_volume_buttons()
         self._register_parameter_callbacks()
 
     # ------------------------------------------------------------------
@@ -445,6 +459,53 @@ class MusicPlayerAgent(AgentBase):
     # ------------------------------------------------------------------
     # Parameters
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Volume (panel buttons + parameter slider stay in sync)
+    # ------------------------------------------------------------------
+    def _add_volume_buttons(self) -> None:
+        for page, prefix in ((PAGE_LOCAL, "local"), (PAGE_ONLINE, "online")):
+            down = self._icon(
+                f"{prefix}_vol_down",
+                "音量 -",
+                "Volume -",
+                "res/vol_down.png",
+                self.on_volume_down,
+                8,
+            )
+            up = self._icon(
+                f"{prefix}_vol_up",
+                "音量 +",
+                "Volume +",
+                "res/vol_up.png",
+                self.on_volume_up,
+                9,
+            )
+            self._ui[f"{prefix}_vol_down"] = down
+            self._ui[f"{prefix}_vol_up"] = up
+            self.page_proxy.register_components(page, [down, up])
+
+    def on_volume_up(self, component: Component) -> Optional[LocaleString]:
+        return self._bump_volume(VOLUME_STEP_PERCENT)
+
+    def on_volume_down(self, component: Component) -> Optional[LocaleString]:
+        return self._bump_volume(-VOLUME_STEP_PERCENT)
+
+    def _bump_volume(self, delta: int) -> Optional[LocaleString]:
+        with self._lock:
+            target = max(0, min(100, int(self._volume) + delta))
+            self._volume = target
+            if target > 0:
+                self._last_nonzero_volume = target
+                self._muted = False
+            muted = self._muted
+        self._apply_volume(0 if muted else target)
+        self._write_param("volume", target)
+        if muted:
+            self._write_param("mute", False)
+        self._save_settings()
+        self._push_ui_state()
+        return LocaleString(f"Volume {target}%", f"音量 {target}%")
+
     def _register_parameter_callbacks(self) -> None:
         pm = self.parameter_manager
         pm.add_parameter_callback("volume", self._on_volume_param)
@@ -788,37 +849,34 @@ class MusicPlayerAgent(AgentBase):
     def _search_worker(self, keyword: str) -> None:
         try:
             query = urllib.parse.urlencode(
-                {
-                    "term": keyword,
-                    "media": "music",
-                    "limit": MAX_ONLINE_RESULTS,
-                    "country": "CN",
-                }
+                {"s": keyword, "type": "1", "limit": MAX_ONLINE_RESULTS}
             )
-            url = f"{ITUNES_SEARCH_URL}?{query}"
             request = urllib.request.Request(
-                url, headers={"User-Agent": "BoosterK1MusicAgent/1.0"}
+                f"{NETEASE_SEARCH_URL}?{query}", headers=NETEASE_HEADERS
             )
-            with urllib.request.urlopen(request, timeout=10) as response:
+            with urllib.request.urlopen(request, timeout=12) as response:
                 payload = json.loads(response.read().decode("utf-8", "replace"))
 
+            songs = ((payload.get("result") or {}).get("songs")) or []
             results: list[Track] = []
-            for item in payload.get("results", []) or []:
-                preview = item.get("previewUrl")
-                if not preview:
+            for item in songs:
+                song_id = item.get("id")
+                if not song_id:
                     continue
+                artists = item.get("artists") or []
+                artist = str(artists[0].get("name") or "") if artists else ""
                 results.append(
                     Track(
-                        title=str(item.get("trackName") or "Unknown"),
-                        artist=str(item.get("artistName") or ""),
+                        title=str(item.get("name") or "Unknown"),
+                        artist=artist,
                         source="online",
-                        location=str(preview),
-                        duration=float(item.get("trackTimeMillis") or 0) / 1000.0,
+                        location=f"netease:{song_id}",
+                        duration=float(item.get("duration") or 0) / 1000.0,
                     )
                 )
             if not results:
                 self._toast_pending = LocaleString(
-                    {"en": "No result", "zh": "没有找到可播放的音频"}
+                    "No playable song found", "没有找到可播放的歌曲"
                 )
                 return
             with self._lock:
@@ -827,10 +885,8 @@ class MusicPlayerAgent(AgentBase):
                 self._tab = PAGE_ONLINE
             self._use_playlist(PAGE_ONLINE)
             self._toast_pending = LocaleString(
-                {
-                    "en": f"{len(results)} result(s). Press play.",
-                    "zh": f"找到 {len(results)} 首，按播放开始",
-                }
+                f"Found {len(results)} song(s), press play",
+                f"找到 {len(results)} 首，按播放开始",
             )
             try:
                 self.page_proxy.force_update()
@@ -841,7 +897,7 @@ class MusicPlayerAgent(AgentBase):
             self.logger.warn(f"search failed: {exc.__class__.__name__}: {exc}")
             self._online_ok = self._check_network()
             self._toast_pending = LocaleString(
-                {"en": "Search failed, check network", "zh": "搜索失败，请检查网络"}
+                "Search failed, check network", "搜索失败，请检查网络"
             )
             self._push_ui_state()
 
@@ -961,22 +1017,94 @@ class MusicPlayerAgent(AgentBase):
                 self._push_ui_state()
 
     def _prepare_source(self, track: Track, offset: float) -> Optional[Path]:
-        """Return a path that robot.play_sound() can play.
+        """Return a local file that robot.play_sound() can play.
 
-        Local files at offset 0 are played directly (native decoder).
-        Everything else (offset > 0, or a remote URL) is transcoded to PCM wav
-        with ffmpeg so that playback can start at an arbitrary position.
+        play_sound() only accepts local paths, so remote tracks are resolved to
+        a direct mp3 URL and downloaded to the cache first. Local files at
+        offset 0 are played directly; anything needing a non-zero offset is
+        transcoded to PCM wav with ffmpeg (play_sound has no seek).
         """
 
+        path = self._local_source_path(track)
+        if path is None:
+            return None
+        if offset <= 0.01:
+            return path
+        return self._transcode(str(path), offset)
+
+    def _local_source_path(self, track: Track) -> Optional[Path]:
         if track.source == "local":
             path = Path(track.location)
-            if not path.is_file():
-                return None
-            if offset <= 0.01:
-                return path
-            return self._transcode(track.location, offset)
+            return path if path.is_file() else None
 
-        return self._transcode(track.location, offset)
+        url = self._resolve_online_url(track)
+        if not url:
+            self.logger.warn(f"no playable url: {track.title}")
+            return None
+        cache = self._storage_root / self._cache_dir
+        try:
+            cache.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+        digest = hashlib.md5(track.location.encode("utf-8")).hexdigest()[:12]
+        dest = cache / f"online_{digest}.mp3"
+        if dest.is_file() and dest.stat().st_size > 4096:
+            return dest
+        if not self._download(url, dest):
+            return None
+        return dest
+
+    def _resolve_online_url(self, track: Track) -> Optional[str]:
+        """Turn a track reference into a directly downloadable mp3 URL."""
+
+        if not track.location.startswith("netease:"):
+            # Already a plain http(s) URL provided by the user.
+            return track.location if track.location.startswith("http") else None
+        song_id = track.location.split(":", 1)[1].strip()
+        if not song_id:
+            return None
+        query = urllib.parse.urlencode({"ids": f"[{song_id}]", "br": "320000"})
+        request = urllib.request.Request(
+            f"{NETEASE_SONG_URL}?{query}", headers=NETEASE_HEADERS
+        )
+        with urllib.request.urlopen(request, timeout=12) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+        items = payload.get("data") or []
+        if not items:
+            return None
+        url = items[0].get("url")
+        if not url:
+            return None
+        return str(url).replace("http://", "https://", 1)
+
+    def _download(self, url: str, dest: Path) -> bool:
+        try:
+            request = urllib.request.Request(url, headers=NETEASE_HEADERS)
+            with urllib.request.urlopen(
+                request, timeout=ONLINE_DOWNLOAD_TIMEOUT_SEC
+            ) as response, open(dest, "wb") as handle:
+                total = 0
+                while True:
+                    chunk = response.read(64 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_DOWNLOAD_BYTES:
+                        raise RuntimeError("audio file too large")
+                    handle.write(chunk)
+            if dest.is_file() and dest.stat().st_size > 4096:
+                self.logger.info(
+                    f"downloaded {total // 1024} KB -> {dest.name}"
+                )
+                return True
+            return False
+        except Exception as exc:
+            self.logger.warn(f"download failed: {exc.__class__.__name__}: {exc}")
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+            return False
 
     def _ffmpeg(self) -> Optional[str]:
         return shutil.which("ffmpeg")

@@ -199,6 +199,12 @@ class MusicPlayerAgent(AgentBase):
         self._load_settings()
         self._build_ui()
         self._add_volume_buttons()
+        # Populate the playlist even before activation completes; activation only
+        # re-scans. Without this, a start that does not activate shows an empty list.
+        try:
+            self._scan_local(refresh_ui=False)
+        except Exception as exc:
+            self.logger.warn(f"initial scan failed: {exc}")
         self._register_parameter_callbacks()
 
     # ------------------------------------------------------------------
@@ -708,6 +714,10 @@ class MusicPlayerAgent(AgentBase):
             playing = self._handle is not None and not paused
         if track is None:
             # Nothing loaded yet: play the current tab's first item.
+            if not self._tracks:
+                # A start that never activated leaves the list empty; rescan once
+                # instead of staying stuck on an empty playlist forever.
+                self._scan_local(refresh_ui=False)
             if not self._tracks:
                 return LocaleString(
                     {"en": "Playlist is empty", "zh": "播放列表为空，请先添加音乐"}

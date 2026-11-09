@@ -197,6 +197,7 @@ App 里 Agent 的 UI 由**两块**组成，这是框架的既定形态：
 
 | 现象 | 检查 |
 | --- | --- |
+| **歌单空的 / 点了没反应** | Agent 处于 `Inactive`。**只 `start_agent` 不会激活**，必须 `set_agent` 才算切换成功。用 `python3 scripts/k1_agent_ctl.py restart com.wenzhoujike.k1.music` |
 | 状态栏一直 `…` | 看日志有没有 `ffmpeg transcode failed`；确认机器人上有 `ffmpeg` |
 | 点播放无反应 | 歌单是否为空（`共 0 首`）；本地文件是否放在 Agent 私有目录的 `music/` 下 |
 | 在线 Tab 消失 | 网络探测失败（20~40 秒一次），检查机器人网络 |

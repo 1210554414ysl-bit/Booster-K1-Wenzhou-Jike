@@ -77,6 +77,9 @@ PCM_CHANNELS = 1
 NETWORK_CHECK_INTERVAL_SEC = 20.0
 NETWORK_TIMEOUT_SEC = 3.0
 UI_TICK_SEC = 1.0
+# Grace window after activation during which parameter callbacks are ignored, so
+# the framework's restored/default parameter pushes cannot clobber our settings.
+PARAM_SETTLE_SEC = 2.0
 FFMPEG_PROBE_TIMEOUT_SEC = 20.0
 FFMPEG_TRANSCODE_TIMEOUT_SEC = 180.0
 PLAYBACK_EXTRA_TIMEOUT_SEC = 30.0
@@ -168,6 +171,9 @@ class MusicPlayerAgent(AgentBase):
         self._online_ok = False
         self._search_results: list[Track] = []
         self._params: dict[str, Any] = {}
+        # Parameter callbacks are ignored until the persisted settings have been
+        # mirrored into the parameter page (see _activate_worker).
+        self._params_ready = False
 
         # ui refs
         self._ui: dict[str, Component] = {}
@@ -244,9 +250,17 @@ class MusicPlayerAgent(AgentBase):
 
     def _activate_worker(self) -> None:
         try:
-            self._apply_volume(self._volume if not self._muted else 0, persist=False)
             self._scan_local(refresh_ui=True)
+            # The framework restores ROS parameter values asynchronously during
+            # startup and may push them a moment after activation. Mirror our
+            # persisted settings first, give the framework a short settling
+            # window (callbacks are ignored meanwhile), then assert the values
+            # that came from our own settings file.
             self._refresh_parameter_values()
+            time.sleep(PARAM_SETTLE_SEC)
+            self._params_ready = True
+            self._refresh_parameter_values()
+            self._apply_volume(0 if self._muted else self._volume)
             self._online_ok = self._check_network()
             self._push_ui_state()
         except Exception as exc:
@@ -318,13 +332,23 @@ class MusicPlayerAgent(AgentBase):
             display_sequence=sequence,
         )
 
+    def _active_page_id(self) -> str:
+        """Which page the App should show (API 10800+ page predicate)."""
+
+        with self._lock:
+            tab = self._tab
+            online_ok = self._online_ok
+        if tab == PAGE_ONLINE and online_ok:
+            return PAGE_ONLINE
+        return PAGE_LOCAL
+
     def _build_ui(self) -> None:
-        self.page_proxy = ComponentStatePageProxy(self)
-        self.page_proxy.register_page(
-            PAGE_LOCAL, lambda *_: self._tab == PAGE_LOCAL
-        )
-        self.page_proxy.register_page(
-            PAGE_ONLINE, lambda *_: self._tab == PAGE_ONLINE and self._online_ok
+        # API 10800+: the proxy asks us which page should be visible. The old
+        # register_page() form is deprecated and gets overridden by the default
+        # robot-state predicate ("AutoGeneralDampingOrPVTInactive"), which made
+        # the App fall back to an empty page.
+        self.page_proxy = ComponentStatePageProxy(
+            self, lambda _state=None: self._active_page_id()
         )
 
         # ---------------- local page ----------------
@@ -367,7 +391,7 @@ class MusicPlayerAgent(AgentBase):
         self._ui["local_mute"] = mute_btn
         self._ui["local_scan"] = scan_btn
 
-        self.page_proxy.register_component(PAGE_LOCAL, status)
+        self.page_proxy.register_component_v2(PAGE_LOCAL, status)
         self.page_proxy.register_components(
             PAGE_LOCAL,
             [back, prev_btn, play_btn, next_btn, mode_btn, mute_btn, scan_btn],
@@ -412,7 +436,7 @@ class MusicPlayerAgent(AgentBase):
         self._ui["online_next"] = o_next
         self._ui["online_mute"] = o_mute
 
-        self.page_proxy.register_component(PAGE_ONLINE, o_status)
+        self.page_proxy.register_component_v2(PAGE_ONLINE, o_status)
         self.page_proxy.register_components(
             PAGE_ONLINE,
             [o_back, o_search, o_url, o_prev, o_play, o_next, o_mute],
@@ -456,6 +480,9 @@ class MusicPlayerAgent(AgentBase):
         self._write_param("seek_percent", float(self._seek_percent()))
 
     def _on_volume_param(self, param) -> None:
+        if not self._params_ready:
+            # Startup default push from the schema; the loaded setting wins.
+            return
         try:
             value = max(0, min(100, int(param.as_int())))
         except Exception:
@@ -476,6 +503,8 @@ class MusicPlayerAgent(AgentBase):
         self._push_ui_state()
 
     def _on_mute_param(self, param) -> None:
+        if not self._params_ready:
+            return
         try:
             muted = bool(param.as_bool())
         except Exception:
@@ -490,6 +519,8 @@ class MusicPlayerAgent(AgentBase):
         self._save_settings()
 
     def _on_seek_param(self, param) -> None:
+        if not self._params_ready:
+            return
         try:
             percent = float(param.as_float())
         except Exception:
@@ -502,6 +533,8 @@ class MusicPlayerAgent(AgentBase):
         self._seek_to(duration * max(0.0, min(100.0, percent)) / 100.0)
 
     def _on_mode_param(self, param) -> None:
+        if not self._params_ready:
+            return
         try:
             mode = str(param.as_string())
         except Exception:
@@ -1198,6 +1231,8 @@ class MusicPlayerAgent(AgentBase):
                 self.logger.warn(f"publish toast failed: {exc}")
 
         text = self._status_text()
+        active = self._active_page_id()
+        status_key = "local_status" if active == PAGE_LOCAL else "online_status"
         if text != self._last_status_text:
             self._last_status_text = text
             for key in ("local_status", "online_status"):
@@ -1206,9 +1241,14 @@ class MusicPlayerAgent(AgentBase):
                     continue
                 try:
                     component.name = LocaleString(text, text)
+                except Exception as exc:
+                    self.logger.warn(f"set text {key} failed: {exc}")
+            component = self._ui.get(status_key)
+            if component is not None:
+                try:
                     self.component_manager.update_component(component)
                 except Exception as exc:
-                    self.logger.warn(f"update {key} failed: {exc}")
+                    self.logger.warn(f"update status failed: {exc}")
 
         with self._lock:
             playing = self._handle is not None and not self._paused
@@ -1220,6 +1260,16 @@ class MusicPlayerAgent(AgentBase):
         self._set_toggle("local_mute", muted)
         self._set_toggle("online_mute", muted)
         self._set_icon("local_mode", self._mode_icon(mode), self._mode_text(mode, "zh"))
+
+    def _is_active_key(self, key: str) -> bool:
+        """Only components of the visible page exist in the App's list."""
+
+        active = self._active_page_id()
+        if key.startswith("local_"):
+            return active == PAGE_LOCAL
+        if key.startswith("online_"):
+            return active == PAGE_ONLINE
+        return True
 
     def _set_toggle(self, key: str, state: bool, loading: bool = False) -> None:
         component = self._ui.get(key)
@@ -1233,7 +1283,9 @@ class MusicPlayerAgent(AgentBase):
                 component.set_selection_ring_loading(loading)
             except Exception:
                 pass
-            if changed or loading:
+            # Components on an inactive page are not in the App's component list;
+            # updating them only produces "not found in component list" warnings.
+            if self._is_active_key(key) and (changed or loading):
                 self.component_manager.update_component(component)
         except Exception as exc:
             self.logger.warn(f"set toggle {key} failed: {exc}")
@@ -1245,10 +1297,9 @@ class MusicPlayerAgent(AgentBase):
         try:
             if getattr(component, "path", "") != icon_path:
                 component.path = icon_path
-                component.name = LocaleString(
-                    {"en": zh_name, "zh": zh_name}
-                )
-                self.component_manager.update_component(component)
+                component.name = LocaleString(zh_name, zh_name)
+                if self._is_active_key(key):
+                    self.component_manager.update_component(component)
         except Exception as exc:
             self.logger.warn(f"set icon {key} failed: {exc}")
 

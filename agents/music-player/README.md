@@ -220,3 +220,80 @@ music-player/
 本地 offset=0        → robot.play_sound(原文件)          （原生解码，最快）
 本地 offset>0 / 在线  → ffmpeg 转 PCM wav → play_sound   （支持任意位置起播）
 ```
+
+---
+
+## 十一、真机验证记录（K1 教育版 / 固件 1.8.1.2）
+
+已在真实机器人上安装并验证，**当前安装版本 v1.0.3**。
+
+### 安装方式（不依赖 App）
+
+机器人上有官方安装客户端，走本地 socket 6868：
+
+```bash
+# 1) 上传安装包
+scp com.wenzhoujike.k1.music-1.0.3.agent booster@<robot-ip>:/tmp/
+
+# 2) 用官方客户端安装（同名包自动升级）
+python3 /opt/booster/BoosterAgent/install_agent_client /tmp/com.wenzhoujike.k1.music-1.0.3.agent
+# → Install success!  resp: {'success': True, 'result': {'agent': {...}}}
+```
+
+安装后文件落在：
+
+```
+/opt/booster/booster_agent_data/data/agents/installed/com.wenzhoujike.k1.music-1.0.3.agent
+/opt/booster/booster_agent_data/data/agents/extract/com.wenzhoujike.k1.music/
+/opt/booster/booster_agent_data/data/agent_storage/com.wenzhoujike.k1.music/     ← 私有存储
+```
+
+### 切换 / 启停 Agent（不用 App）
+
+管理器的协议支持 `get_agents` / `set_agent` / `start_agent` / `stop_agent` / `uninstall_agent`，
+JSON + 4 字节长度前缀走 `127.0.0.1:6868`。见仓库内 `agent_client.py`。
+
+> ⚠️ `set_agent` 对**已经在运行的同一个 Agent 是空操作**。要真正重启，必须
+> `stop_agent` → 等 6 秒 → `start_agent`。
+
+### 实测结果
+
+| 验证项 | 结果 |
+| --- | --- |
+| 安装 / 升级（1.0.0 → 1.0.1 → 1.0.2 → 1.0.3） | ✅ 全部 `success: True` |
+| Agent 启动 | ✅ `MusicPlayerAgent activated`，状态 `Active / running=True` |
+| 16 个组件注册 | ✅ 本地页 8 个 + 在线页 8 个 |
+| 页面切换（Tab） | ✅ `page switch -> page_local, component count=8` |
+| 本地歌单扫描 | ✅ `local scan: 2 track(s)` |
+| **系统音量接口** | ✅ 设置 80% → `pactl` 实测 80%；恢复 50% 同样生效 |
+| **状态持久化** | ✅ 连续两次重启都保持在写入的 30%，不再被默认值覆盖 |
+| ffmpeg 转码 | ✅ 4 分 53 秒 mp3 → PCM wav 仅 **1.6 秒** |
+| 启动期异常 | ✅ 无 Traceback（`Loco operation service wait timeout` 是机器人未站立时的正常日志） |
+
+### 真机上修掉的两个 bug（v1.0.1 / v1.0.2）
+
+1. **页面不显示**（v1.0.0 → v1.0.1）
+   现象：日志 `Next page ID not found in pages map: AutoGeneralDampingOrPVTInactive, processing as empty page`
+   原因：旧的 `register_page()` 写法会被框架默认的机器人状态页面谓词覆盖。
+   修复：改用 API 10800 的 `ComponentStatePageProxy(agent, page_predicate)` 构造方式，
+   谓词直接返回当前页 id。
+
+2. **重启后音量被重置成 50%**（v1.0.1 → v1.0.2）
+   现象：`settings loaded: volume=80` 之后紧跟 `system volume -> 50%`
+   原因：框架启动时会异步推送 schema 默认参数值，回调把刚读出来的设置覆盖了。
+   修复：加 `_params_ready` 门闸 + `PARAM_SETTLE_SEC = 2s` 静默窗口，之后再以设置文件为准回写参数并应用。
+
+### 还没验证的
+
+- **实际出声播放**：需要 App 里点一次播放键（或无头注入手柄事件）。机器人没有安装
+  `ros2` 命令行，无法从外部注入快捷键事件，因此这一步留给人工确认。
+- 在线搜索（需要机器人访问 `itunes.apple.com`）。
+
+### 放音乐的位置
+
+```
+/opt/booster/booster_agent_data/data/agent_storage/com.wenzhoujike.k1.music/music/
+```
+
+放进去后点「刷新歌单」图标，或重启 Agent（启动会自动扫描）。
+

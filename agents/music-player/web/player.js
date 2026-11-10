@@ -86,22 +86,23 @@ function renderPlayer() {
   get("mode").disabled = get("mute").disabled = volume.disabled = !state.ready;
   if (!previewingVolume) volume.value = state.volume ?? 50;
   get("volume-value").textContent = `${volume.value}%`;
+  document.querySelectorAll("[data-action]").forEach((button) => { button.disabled = false; });
   renderProgress();
   updateHighlight();
 }
 
 async function request(message) {
-  const bridge = window.BoosterNativeBridge;
-  let timer;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
   try {
-    const reply = await Promise.race([
-      Promise.resolve(bridge.sendMessageToAgent(message)),
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error("Robot request timed out")), 2500);
-      }),
-    ]);
-    const envelope = typeof reply === "string" ? JSON.parse(reply) : reply;
-    const result = envelope?.result ?? envelope;
+    const response = await fetch("./api", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(message),
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error("Robot request failed");
+    const result = await response.json();
     if (result?.success !== true) throw new Error("Robot rejected request");
     return result;
   } finally {
@@ -111,11 +112,6 @@ async function request(message) {
 
 async function refresh() {
   if (fetching || saving) return;
-  const bridge = window.BoosterNativeBridge;
-  if (typeof bridge?.sendMessageToAgent !== "function") {
-    notice.textContent = "请在 Booster App 主控页点「歌单与进度」。";
-    return;
-  }
   fetching = true;
   try {
     const { state: next, revision, catalog: entries } = await request({ command: "status", revision: catalogRevision });
@@ -138,7 +134,6 @@ async function refresh() {
 }
 
 async function send(message) {
-  if (typeof window.BoosterNativeBridge?.sendMessageToAgent !== "function") return;
   saving = true;
   try {
     await request(message);

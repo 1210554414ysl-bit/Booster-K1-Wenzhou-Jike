@@ -22,6 +22,7 @@ import json
 import os
 import random
 import re
+import secrets
 import shutil
 import subprocess
 import threading
@@ -88,7 +89,7 @@ def _fmt_time(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def _serve_panel() -> tuple[ThreadingHTTPServer, str]:
+def _serve_panel(dispatch) -> tuple[ThreadingHTTPServer, str]:
     content_types = {
         "/": "text/html; charset=utf-8",
         "/player.css": "text/css; charset=utf-8",
@@ -111,27 +112,58 @@ def _serve_panel() -> tuple[ThreadingHTTPServer, str]:
     if not addresses:
         raise RuntimeError("no local IPv4 address for the player panel")
     host = next((address for name, address in addresses if name.startswith("wl")), addresses[0][1])
+    # The URL acts as a capability. The server shares no files outside the bundle.
+    prefix = f"/music/{secrets.token_urlsafe(24)}"
+    command_lock = threading.Lock()
 
     class PanelHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            route = urlsplit(self.path).path
+            path = urlsplit(self.path).path
+            route = path[len(prefix):] if path.startswith(prefix + "/") else ""
             if route not in assets:
                 self.send_error(404)
                 return
-            content = assets[route]
+            self._respond(assets[route], content_types[route])
+
+        def do_POST(self) -> None:
+            if urlsplit(self.path).path != prefix + "/api":
+                self.send_error(404)
+                return
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                if not 0 < size <= 4096 or self.headers.get_content_type() != "application/json":
+                    self.send_error(400)
+                    return
+                self.connection.settimeout(3)
+                message = json.loads(self.rfile.read(size))
+            except (OSError, ValueError):
+                self.send_error(400)
+                return
+            if isinstance(message, dict) and message.get("command") == "status":
+                result = dispatch(message)
+            else:
+                with command_lock:
+                    result = dispatch(message)
+            self._respond(json.dumps(result, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+
+        def _respond(self, content: bytes, content_type: str) -> None:
             self.send_response(200)
-            self.send_header("Content-Type", content_types[route])
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(content)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
             self.end_headers()
-            self.wfile.write(content)
+            try:
+                self.wfile.write(content)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
         def log_message(self, format, *args) -> None:
             pass
 
     server = ThreadingHTTPServer(("0.0.0.0", 0), PanelHandler)
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True).start()
-    return server, f"http://{host}:{server.server_port}/"
+    return server, f"http://{host}:{server.server_port}{prefix}/"
 
 
 class Track:
@@ -378,10 +410,10 @@ class MusicPlayerAgent(AgentBase):
             [prev_btn, play_btn, next_btn, mode_btn, mute_btn, vol_down, vol_up, scan_btn],
         )
         try:
-            self._panel_server, url = _serve_panel()
+            self._panel_server, url = _serve_panel(self._on_panel_request)
             panel = OnlineWebviewComponent(
                 "music_panel", LocaleString("Library & Progress", "歌单与进度"),
-                "res/tab_local.png", url, self._on_panel_request, ComponentOrientation.kLANDSCAPE,
+                "res/tab_local.png", url, None, ComponentOrientation.kLANDSCAPE,
                 display_sequence=9,
             )
             self._ui["music_panel"] = panel

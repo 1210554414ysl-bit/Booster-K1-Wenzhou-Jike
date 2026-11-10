@@ -19,9 +19,9 @@
       <input id="progress" type="range" min="0" max="100" step="0.1" value="0" aria-label="播放进度" disabled>
       <div class="times"><span id="elapsed">00:00</span><span id="duration">00:00</span></div>
       <div class="transport">
-        <button type="button" class="secondary" data-action="previous">上一首</button>
-        <button type="button" class="primary" id="toggle" data-action="play_pause">播放</button>
-        <button type="button" class="secondary" data-action="next">下一首</button>
+        <button type="button" class="secondary" data-action="previous" disabled>上一首</button>
+        <button type="button" class="primary" id="toggle" data-action="play_pause" disabled>播放</button>
+        <button type="button" class="secondary" data-action="next" disabled>下一首</button>
       </div>
       <div class="settings">
         <label><span>播放模式</span><select id="mode" disabled>
@@ -39,7 +39,7 @@
     <section class="library" aria-labelledby="library-title">
       <div class="library-header">
         <div><h2 id="library-title">全部歌曲</h2><p id="song-count" class="muted"></p></div>
-        <button type="button" class="secondary" data-action="scan">刷新歌单</button>
+        <button type="button" class="secondary" data-action="scan" disabled>刷新歌单</button>
       </div>
       <input id="search" type="search" placeholder="搜索歌名或歌手" aria-label="搜索歌名或歌手" autocomplete="off">
       <p id="empty" class="muted" hidden></p>

@@ -4,15 +4,15 @@
 Plays mp3/wav files from the Agent private storage directory with:
 - play / pause / previous / next
 - sequential / shuffle / repeat-one play modes
-- seek (via a parameter slider, transcoded with ffmpeg)
+- seek (via a parameter slider, decoded from that position by ffmpeg)
 - system volume control (buttons + parameter slider + mute)
 - persisted play mode and volume
 
 Threading model
 ---------------
-* One worker owns the audio handle and cancels it before starting another.
+* One worker owns the FFmpeg audio process and stops it before starting another.
 * Callbacks replace the pending playback request without waiting for audio I/O.
-* UI refreshes take the UI lock before reading playback state.
+* One UI thread publishes state changes without blocking the button callbacks.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ import random
 import re
 import shutil
 import subprocess
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -63,14 +62,11 @@ CACHE_DIR = Path("cache")
 AUDIO_EXTS = (".mp3", ".wav")
 MAX_SCAN_DEPTH = 4
 
-PCM_SAMPLE_RATE = 22050
-PCM_CHANNELS = 1
-
 UI_TICK_SEC = 1.0
 PARAM_SETTLE_SEC = 2.0
 FFMPEG_PROBE_TIMEOUT_SEC = 20.0
-FFMPEG_TRANSCODE_TIMEOUT_SEC = 180.0
 PLAYBACK_POLL_SEC = 0.2
+PLAYBACK_STOP_SEC = 0.5
 VOLUME_STEP_PERCENT = 10
 
 
@@ -113,9 +109,7 @@ class MusicPlayerAgent(AgentBase):
 
         # --- locks / threading --------------------------------------------
         self._lock = threading.RLock()
-        # Serializes every framework call (component_manager / page_proxy),
-        # which is not thread-safe.
-        self._ui_lock = threading.Lock()
+        self._ui_changed = threading.Event()
         self._robot_lock = threading.RLock()
         self._playback_changed = threading.Condition(self._lock)
         self._pending_playback: Optional[tuple[int, Track, float]] = None
@@ -162,6 +156,7 @@ class MusicPlayerAgent(AgentBase):
         except Exception as exc:
             self.logger.warn(f"initial scan failed: {exc}")
         self._playback_thread = threading.Thread(target=self._playback_worker, daemon=True)
+        self._ui_thread = threading.Thread(target=self._ui_ticker, daemon=True)
         self._playback_thread.start()
 
     # ------------------------------------------------------------------
@@ -230,8 +225,8 @@ class MusicPlayerAgent(AgentBase):
     # ------------------------------------------------------------------
     def on_agent_activated(self) -> None:
         self.logger.info("MusicPlayerAgent activated")
+        self._push_ui_state()
         threading.Thread(target=self._activate_worker, daemon=True).start()
-        threading.Thread(target=self._ui_ticker, daemon=True).start()
 
     def _activate_worker(self) -> None:
         try:
@@ -256,6 +251,7 @@ class MusicPlayerAgent(AgentBase):
             self._pending_playback = None
             self._handle = None
             self._playback_changed.notify()
+        self._ui_changed.set()
         # Give the audio worker a bounded chance to stop before process teardown.
         self._playback_thread.join(timeout=1.0)
         self._save_settings()
@@ -606,8 +602,6 @@ class MusicPlayerAgent(AgentBase):
             self._play_track(*request)
 
     def _play_track(self, generation: int, track: Track, offset: float) -> None:
-        handle = None
-        cache = None
         try:
             source = Path(track.location)
             if not source.is_file():
@@ -618,38 +612,43 @@ class MusicPlayerAgent(AgentBase):
             if duration > 0 and offset >= duration:
                 self._finish_playback(generation, succeeded=True)
                 return
-            if offset > 0.01:
-                cache = tempfile.TemporaryDirectory(
-                    dir=self._cache_dir, prefix="playback-", ignore_cleanup_errors=True
-                )
-                source = self._transcode(source, offset, Path(cache.name) / "track.wav", generation)
 
-            if not self._is_current(generation):
-                return
-            robot = self._get_robot()
-            if robot is None:
-                raise RuntimeError("robot sdk not ready")
-            if not self._is_current(generation):
-                return
-            handle = robot.play_sound(str(source))
-            with self._lock:
-                if self._generation != generation or self._shutdown:
-                    return
-                self._handle = handle
-                self._started_at = time.monotonic()
-                self._offset = offset
-                self._duration = duration
-                self._loading = False
-                track.duration = duration
+            command = self._ffmpeg_command(
+                "-loglevel", "error", "-ss", f"{offset:.3f}", "-i", str(source),
+                "-map", "0:a:0", "-ac", "2", "-ar", "48000",
+                "-f", "pulse", "-buffer_duration", "150",
+                "-stream_name", "K1 Music Player", "K1 Music Player",
+            )
+            with subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                env=self._playback_environment(),
+            ) as player:
+                try:
+                    with self._lock:
+                        if self._generation != generation or self._shutdown:
+                            return
+                        self._handle = player
+                        self._started_at = time.monotonic()
+                        self._offset = offset
+                        self._duration = duration
+                        self._loading = False
+                        track.duration = duration
+                    self._push_ui_state()
 
-            self._push_ui_state()
-            while self._is_current(generation) and not handle.done():
-                handle.wait(timeout=PLAYBACK_POLL_SEC)
-            if not self._is_current(generation):
-                return
-            if handle.status == "FAILED":
-                raise RuntimeError(f"audio SDK failed: {handle.error}")
-            self._finish_playback(generation, succeeded=handle.status == "SUCCEEDED")
+                    while self._is_current(generation):
+                        try:
+                            _, stderr = player.communicate(timeout=PLAYBACK_POLL_SEC)
+                        except subprocess.TimeoutExpired:
+                            continue
+                        if player.returncode != 0:
+                            detail = stderr.decode("utf-8", "replace").strip()[:300]
+                            raise RuntimeError(f"ffmpeg playback failed ({player.returncode}): {detail}")
+                        self._finish_playback(generation, succeeded=True)
+                        return
+                finally:
+                    self._stop_player(player)
         except Exception as exc:
             if self._is_current(generation):
                 self.logger.error(f"playback failed ({track.title}): {exc.__class__.__name__}: {exc}")
@@ -658,26 +657,36 @@ class MusicPlayerAgent(AgentBase):
                     succeeded=False,
                     error=LocaleString("Unable to play this track", "无法播放这首歌"),
                 )
-        finally:
-            if handle is not None:
-                self._settle(handle)
-            if cache is not None:
-                cache.cleanup()
 
-    def _settle(self, handle) -> None:
+    @staticmethod
+    def _playback_environment() -> dict[str, str]:
+        environment = os.environ.copy()
+        if os.name == "posix" and not environment.get("PULSE_SERVER"):
+            # The Agent service does not inherit the user's desktop session.
+            pulse_socket = Path(f"/run/user/{os.getuid()}/pulse/native")
+            if pulse_socket.is_socket():
+                environment["PULSE_SERVER"] = f"unix:{pulse_socket}"
+        return environment
+
+    @staticmethod
+    def _stop_player(player: subprocess.Popen) -> None:
+        if player.poll() is not None:
+            return
+        player.terminate()
         try:
-            if not handle.done():
-                handle.cancel()
-            while not handle.done() and not self._shutdown:
-                handle.wait(timeout=PLAYBACK_POLL_SEC)
-        except Exception as exc:
-            self.logger.warn(f"settle handle failed: {exc}")
+            player.communicate(timeout=PLAYBACK_STOP_SEC)
+        except subprocess.TimeoutExpired:
+            player.kill()
+            player.communicate()
 
-    def _run_ffmpeg(self, arguments: list[str], generation: int, timeout: float) -> tuple[int, bytes]:
+    @staticmethod
+    def _ffmpeg_command(*arguments: str) -> list[str]:
         ffmpeg = shutil.which("ffmpeg")
         if ffmpeg is None:
             raise RuntimeError("ffmpeg is unavailable")
-        command = [ffmpeg, "-nostdin", "-hide_banner", *arguments]
+        return [ffmpeg, "-nostdin", "-hide_banner", *arguments]
+    def _run_ffmpeg(self, arguments: list[str], generation: int, timeout: float) -> tuple[int, bytes]:
+        command = self._ffmpeg_command(*arguments)
         deadline = time.monotonic() + timeout
         with subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as process:
             try:
@@ -695,23 +704,6 @@ class MusicPlayerAgent(AgentBase):
                 if process.poll() is None:
                     process.kill()
                     process.communicate()
-
-    def _transcode(self, source: Path, offset: float, target: Path, generation: int) -> Path:
-        returncode, stderr = self._run_ffmpeg(
-            [
-                "-y", "-loglevel", "error", "-ss", f"{offset:.3f}", "-i", str(source),
-                "-ac", str(PCM_CHANNELS), "-ar", str(PCM_SAMPLE_RATE),
-                "-c:a", "pcm_s16le", "-f", "wav", str(target),
-            ],
-            generation,
-            FFMPEG_TRANSCODE_TIMEOUT_SEC,
-        )
-        if self._is_current(generation) and (
-            returncode != 0 or not target.is_file() or target.stat().st_size <= 44
-        ):
-            detail = stderr.decode("utf-8", "replace")[:300]
-            raise RuntimeError(f"ffmpeg could not seek: {detail}")
-        return target
 
     def _probe_duration(self, path: Path, generation: int) -> float:
         try:
@@ -806,13 +798,14 @@ class MusicPlayerAgent(AgentBase):
     # ------------------------------------------------------------------
     def _ui_ticker(self) -> None:
         while not self._shutdown:
-            time.sleep(UI_TICK_SEC)
+            self._ui_changed.wait(UI_TICK_SEC)
+            self._ui_changed.clear()
             if self._shutdown:
                 return
             try:
-                self._push_ui_state()
-            except Exception:
-                pass
+                self._refresh_ui()
+            except Exception as exc:
+                self.logger.warn(f"refresh UI failed: {exc}")
 
     def _status_text(self) -> str:
         with self._lock:
@@ -836,10 +829,14 @@ class MusicPlayerAgent(AgentBase):
         return f"{prefix} {counter} {track.title[:16]}  {_fmt_time(position)}/{_fmt_time(total)}"
 
     def _push_ui_state(self) -> None:
-        with self._ui_lock:
-            self._push_ui_state_locked()
+        with self._lock:
+            if self._shutdown:
+                return
+            if self._ui_thread.ident is None:
+                self._ui_thread.start()
+        self._ui_changed.set()
 
-    def _push_ui_state_locked(self) -> None:
+    def _refresh_ui(self) -> None:
         pending = self._toast_pending
         if pending is not None:
             self._toast_pending = None

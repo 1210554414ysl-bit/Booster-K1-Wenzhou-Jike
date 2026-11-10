@@ -8,14 +8,14 @@ const collator = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base"
 const normalize = (value) => value.normalize("NFKC").toLocaleLowerCase();
 
 let catalog = [];
-let catalogValue;
+let catalogRevision;
 let state = {};
+let stateReceivedAt = 0;
 let fetching = false;
 let saving = false;
 let previewingSeek = false;
 let seekTrack;
 let previewingVolume = false;
-let nonce = 0;
 let highlighted;
 let commands = Promise.resolve();
 
@@ -29,8 +29,8 @@ function formatTime(seconds) {
 
 function renderProgress() {
   const duration = state.duration || 0;
-  const elapsed = state.started ? Math.max(0, Date.now() / 1000 - state.started) : 0;
-  const position = Math.min(duration, (state.offset || 0) + elapsed);
+  const elapsed = state.playing ? Math.min(2, (performance.now() - stateReceivedAt) / 1000) : 0;
+  const position = Math.min(duration, (state.position || 0) + elapsed);
   if (!previewingSeek) {
     progress.value = duration ? 100 * position / duration : 0;
   }
@@ -79,8 +79,8 @@ function renderSongs() {
 
 function renderPlayer() {
   get("track-title").textContent = state.title || "从下方歌单选一首歌";
-  get("playback-label").textContent = state.loading ? "正在加载" : state.started ? "正在播放" : state.paused ? "已暂停" : "等待播放";
-  get("toggle").textContent = state.started || state.loading ? "暂停" : state.paused ? "继续播放" : "播放";
+  get("playback-label").textContent = state.loading ? "正在加载" : state.playing ? "正在播放" : state.paused ? "已暂停" : "等待播放";
+  get("toggle").textContent = state.playing || state.loading ? "暂停" : state.paused ? "继续播放" : "播放";
   get("mode").value = state.mode || "order";
   get("mute").checked = Boolean(state.muted);
   get("mode").disabled = get("mute").disabled = volume.disabled = !state.ready;
@@ -90,30 +90,44 @@ function renderPlayer() {
   updateHighlight();
 }
 
+async function request(message) {
+  const bridge = window.BoosterNativeBridge;
+  let timer;
+  try {
+    const reply = await Promise.race([
+      Promise.resolve(bridge.sendMessageToAgent(message)),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Robot request timed out")), 2500);
+      }),
+    ]);
+    const envelope = typeof reply === "string" ? JSON.parse(reply) : reply;
+    const result = envelope?.result ?? envelope;
+    if (result?.success !== true) throw new Error("Robot rejected request");
+    return result;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function refresh() {
   if (fetching || saving) return;
   const bridge = window.BoosterNativeBridge;
-  if (!bridge) {
-    notice.textContent = "请在 Booster App 的音乐播放器参数面板中打开。";
+  if (typeof bridge?.sendMessageToAgent !== "function") {
+    notice.textContent = "请在 Booster App 主控页点「歌单与进度」。";
     return;
   }
   fetching = true;
   try {
-    const { parameters } = await bridge.getParameters();
-    const next = JSON.parse(parameters.player_status || "{}");
-    if (typeof next.mode !== "string") {
-      notice.textContent = "正在等待机器人加载歌单…";
-      return;
-    }
+    const { state: next, revision, catalog: entries } = await request({ command: "status", revision: catalogRevision });
     if (state.track !== next.track) previewingSeek = false;
     state = next;
-    if (catalogValue !== parameters.music_catalog) {
-      const entries = JSON.parse(parameters.music_catalog || "[]");
+    stateReceivedAt = performance.now();
+    if (entries) {
       catalog = entries.map(([id, title]) => ({ id, title, searchable: normalize(title) }));
       catalog.sort((a, b) => collator.compare(a.title, b.title));
-      catalogValue = parameters.music_catalog;
       renderSongs();
     }
+    catalogRevision = revision;
     renderPlayer();
     notice.textContent = state.ready ? "" : "正在加载播放设置…";
   } catch (error) {
@@ -123,12 +137,11 @@ async function refresh() {
   }
 }
 
-async function send(parameters) {
-  if (!window.BoosterNativeBridge) return;
+async function send(message) {
+  if (typeof window.BoosterNativeBridge?.sendMessageToAgent !== "function") return;
   saving = true;
   try {
-    const result = await window.BoosterNativeBridge.saveParameters(parameters);
-    if (result?.success === false) throw new Error("Parameter rejected");
+    await request(message);
     notice.textContent = "";
   } catch (error) {
     notice.textContent = "操作没成功，请重试。";
@@ -136,16 +149,12 @@ async function send(parameters) {
   } finally {
     saving = false;
   }
-  await refresh();
+  refresh();
 }
 
-function save(parameters) {
-  commands = commands.then(() => send(parameters));
+function command(name, extra = {}) {
+  commands = commands.then(() => send({ command: name, ...extra }));
   return commands;
-}
-
-function command(action, extra = {}) {
-  return save({ player_command: JSON.stringify({ action, ...extra, nonce: `${Date.now()}-${++nonce}` }) });
 }
 
 document.querySelectorAll("[data-action]").forEach((button) => {
@@ -180,11 +189,11 @@ volume.addEventListener("input", () => {
 });
 volume.addEventListener("change", () => {
   previewingVolume = false;
-  save({ volume: Number(volume.value) });
+  command("setting", { name: "volume", value: Number(volume.value) });
 });
-get("mute").addEventListener("change", (event) => save({ mute: event.target.checked }));
-get("mode").addEventListener("change", (event) => save({ play_mode: event.target.value }));
-get("close").addEventListener("click", () => window.BoosterNativeBridge?.close());
+get("mute").addEventListener("change", (event) => command("setting", { name: "mute", value: event.target.checked }));
+get("mode").addEventListener("change", (event) => command("setting", { name: "play_mode", value: event.target.value }));
+get("close").addEventListener("click", () => window.BoosterNativeBridge?.close?.());
 
 refresh();
 setInterval(refresh, 1000);

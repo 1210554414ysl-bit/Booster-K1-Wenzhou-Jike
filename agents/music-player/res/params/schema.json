@@ -79,24 +79,6 @@
         { "nameI18nKey": "modeShuffle", "value": "shuffle" },
         { "nameI18nKey": "modeRepeatOne", "value": "repeat_one" }
       ]
-    },
-    {
-      "fieldType": "string",
-      "key": "music_catalog",
-      "name": "Music catalog",
-      "defaultValue": "[]"
-    },
-    {
-      "fieldType": "string",
-      "key": "player_status",
-      "name": "Playback status",
-      "defaultValue": "{}"
-    },
-    {
-      "fieldType": "string",
-      "key": "player_command",
-      "name": "Player command",
-      "defaultValue": ""
     }
   ]
 }

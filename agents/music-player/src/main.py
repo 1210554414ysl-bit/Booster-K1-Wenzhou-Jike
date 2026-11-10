@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import random
 import re
@@ -27,17 +26,22 @@ import shutil
 import subprocess
 import threading
 import time
+import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from booster_agent_framework import (
     AgentBase,
     AgentFeatures,
     Component,
+    ComponentOrientation,
     ComponentStatePageProxy,
     DefaultStateIconComponent,
     IconComponent,
     LocaleString,
+    OnlineWebviewComponent,
     PlaceholderComponent,
     ToastIcon,
     ToastPosition,
@@ -61,6 +65,7 @@ MODES = (MODE_ORDER, MODE_SHUFFLE, MODE_REPEAT_ONE)
 SETTINGS_FILE = Path("music_player_settings.json")
 MUSIC_DIR = Path("music")
 CACHE_DIR = Path("cache")
+PANEL_BUNDLE = Path("resources/music_panel.zip")
 AUDIO_EXTS = (".mp3", ".wav")
 MAX_SCAN_DEPTH = 4
 
@@ -81,6 +86,52 @@ def _fmt_time(seconds: float) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes:02d}:{secs:02d}"
+
+
+def _serve_panel() -> tuple[ThreadingHTTPServer, str]:
+    content_types = {
+        "/": "text/html; charset=utf-8",
+        "/player.css": "text/css; charset=utf-8",
+        "/player.js": "text/javascript; charset=utf-8",
+    }
+    with zipfile.ZipFile(PANEL_BUNDLE) as bundle:
+        assets = {
+            route: bundle.read(f"dist/{'index.html' if route == '/' else route[1:]}")
+            for route in content_types
+        }
+    interfaces = json.loads(subprocess.check_output(
+        ["ip", "-j", "-4", "addr", "show", "up", "scope", "global"], timeout=3
+    ))
+    addresses = [
+        (interface["ifname"], address["local"])
+        for interface in interfaces
+        for address in interface.get("addr_info", [])
+        if interface["ifname"].startswith(("wl", "en", "eth", "usb"))
+    ]
+    if not addresses:
+        raise RuntimeError("no local IPv4 address for the player panel")
+    host = next((address for name, address in addresses if name.startswith("wl")), addresses[0][1])
+
+    class PanelHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            route = urlsplit(self.path).path
+            if route not in assets:
+                self.send_error(404)
+                return
+            content = assets[route]
+            self.send_response(200)
+            self.send_header("Content-Type", content_types[route])
+            self.send_header("Content-Length", str(len(content)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(content)
+
+        def log_message(self, format, *args) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("0.0.0.0", 0), PanelHandler)
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True).start()
+    return server, f"http://{host}:{server.server_port}/"
 
 
 class Track:
@@ -138,14 +189,13 @@ class MusicPlayerAgent(AgentBase):
         self._paused = False
         self._offset = 0.0
         self._started_at = 0.0
-        self._started_epoch = 0.0
         self._duration = 0.0
         self._current: Optional[Track] = None
 
         self._params: dict[str, Any] = {}
         self._params_ready = False
-        self._catalog_json = "[]"
-        self._published_panel: dict[str, str] = {}
+        self._catalog_revision = 0
+        self._panel_server: Optional[ThreadingHTTPServer] = None
 
         self._ui: dict[str, Component] = {}
         self._last_status_text = ""
@@ -261,6 +311,9 @@ class MusicPlayerAgent(AgentBase):
         self._ui_changed.set()
         # Give the audio worker a bounded chance to stop before process teardown.
         self._playback_thread.join(timeout=1.0)
+        if self._panel_server is not None:
+            self._panel_server.shutdown()
+            self._panel_server.server_close()
         self._save_settings()
 
     # ------------------------------------------------------------------
@@ -324,6 +377,18 @@ class MusicPlayerAgent(AgentBase):
             PAGE_LOCAL,
             [prev_btn, play_btn, next_btn, mode_btn, mute_btn, vol_down, vol_up, scan_btn],
         )
+        try:
+            self._panel_server, url = _serve_panel()
+            panel = OnlineWebviewComponent(
+                "music_panel", LocaleString("Library & Progress", "歌单与进度"),
+                "res/tab_local.png", url, self._on_panel_request, ComponentOrientation.kLANDSCAPE,
+                display_sequence=9,
+            )
+            self._ui["music_panel"] = panel
+            self.page_proxy.register_component(PAGE_LOCAL, panel)
+            self.logger.info(f"Music panel available at {url}")
+        except Exception as exc:
+            self.logger.warn(f"music panel unavailable: {exc}")
 
     # ------------------------------------------------------------------
     # Parameters
@@ -334,7 +399,6 @@ class MusicPlayerAgent(AgentBase):
         pm.add_parameter_callback("mute", self._on_mute_param)
         pm.add_parameter_callback("seek_percent", self._on_seek_param)
         pm.add_parameter_callback("play_mode", self._on_mode_param)
-        pm.add_parameter_callback("player_command", self._on_player_command)
 
     def _write_param(self, name: str, value: Any) -> bool:
         try:
@@ -414,14 +478,12 @@ class MusicPlayerAgent(AgentBase):
         self._save_settings()
         self._push_ui_state()
 
-    def _on_player_command(self, param) -> None:
-        try:
-            command = json.loads(param.as_string())
-        except (TypeError, ValueError):
-            return
-        if not isinstance(command, dict) or self._shutdown:
-            return
-        action = command.get("action")
+    def _on_panel_request(self, message: Any) -> dict:
+        if not isinstance(message, dict) or self._shutdown:
+            return {"success": False}
+        action = message.get("command")
+        if action == "status":
+            return self._panel_status(message.get("revision"))
         if action == "play_pause":
             self.on_play_pause(None)
         elif action == "previous":
@@ -432,14 +494,29 @@ class MusicPlayerAgent(AgentBase):
             self.on_scan(None)
         elif action == "select":
             with self._lock:
-                index = next((i for i, track in enumerate(self._tracks) if track.key == command.get("track")), None)
-                if index is not None:
-                    self._select_track_locked(index)
+                index = next((i for i, track in enumerate(self._tracks) if track.key == message.get("track")), None)
+                if index is None:
+                    return {"success": False}
+                self._select_track_locked(index)
             self._push_ui_state()
         elif action == "seek":
-            percent = command.get("percent")
-            if isinstance(percent, (int, float)) and math.isfinite(percent):
-                self._seek_to(percent, expected_track=command.get("track"))
+            percent = message.get("percent")
+            if type(percent) not in (int, float) or not 0 <= percent <= 100:
+                return {"success": False}
+            self._seek_to(percent, expected_track=message.get("track"))
+        elif action == "setting":
+            name, value = message.get("name"), message.get("value")
+            valid = (
+                (name == "volume" and type(value) in (int, float) and 0 <= value <= 100 and value == int(value))
+                or (name == "mute" and type(value) is bool)
+                or (name == "play_mode" and value in MODES)
+            )
+            if not self._params_ready or not valid:
+                return {"success": False}
+            return {"success": self._write_param(name, int(value) if name == "volume" else value)}
+        else:
+            return {"success": False}
+        return {"success": True}
 
     def _apply_volume(self, value_percent: int) -> None:
         target = max(0.0, min(1.0, float(value_percent) / 100.0))
@@ -579,6 +656,7 @@ class MusicPlayerAgent(AgentBase):
             if [track.key for track in self._tracks] != [track.key for track in unique]:
                 self._shuffle_bag.clear()
                 self._shuffle_history.clear()
+                self._catalog_revision += 1
             self._tracks = unique
             if self._current is not None:
                 self._index = -1
@@ -589,9 +667,6 @@ class MusicPlayerAgent(AgentBase):
                         break
             elif self._index >= len(unique):
                 self._index = -1
-            self._catalog_json = json.dumps(
-                [[track.key, track.title] for track in unique], ensure_ascii=False, separators=(",", ":")
-            )
         self.logger.info(f"local scan: {len(unique)} track(s) under {root}")
         if refresh_ui:
             self._push_ui_state()
@@ -680,7 +755,6 @@ class MusicPlayerAgent(AgentBase):
                             return
                         self._handle = player
                         self._started_at = time.monotonic()
-                        self._started_epoch = time.time()
                         self._offset = offset
                         self._duration = duration
                         self._loading = False
@@ -938,17 +1012,16 @@ class MusicPlayerAgent(AgentBase):
         self._set_toggle("local_play", playing, loading)
         self._set_toggle("local_mute", muted)
         self._set_icon("local_mode", self._mode_icon(mode), self._mode_text(mode, "zh"))
-        self._publish_player_panel()
 
-    def _publish_player_panel(self) -> None:
+    def _panel_status(self, revision: Any) -> dict:
         with self._lock:
             current = self._current
-            panel_state = {
+            status = {
                 "track": current.key if current else "",
                 "title": current.title if current else "",
                 "duration": self._duration,
-                "offset": self._offset,
-                "started": self._started_epoch if self._handle is not None else 0,
+                "position": self._position_locked(),
+                "playing": self._handle is not None,
                 "loading": self._loading,
                 "paused": self._paused,
                 "mode": self._mode,
@@ -956,11 +1029,10 @@ class MusicPlayerAgent(AgentBase):
                 "muted": self._muted,
                 "ready": self._params_ready,
             }
-            catalog = self._catalog_json
-        status = json.dumps(panel_state, ensure_ascii=False, separators=(",", ":"))
-        for name, value in (("music_catalog", catalog), ("player_status", status)):
-            if self._published_panel.get(name) != value and self._write_param(name, value):
-                self._published_panel[name] = value
+            result = {"success": True, "state": status, "revision": self._catalog_revision}
+            if revision != self._catalog_revision:
+                result["catalog"] = [[track.key, track.title] for track in self._tracks]
+            return result
 
     def _set_toggle(self, key: str, state: bool, loading: bool = False) -> None:
         component = self._ui.get(key)

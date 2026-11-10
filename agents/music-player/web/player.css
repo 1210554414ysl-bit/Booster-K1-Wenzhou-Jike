@@ -1,0 +1,46 @@
+:root {
+  color-scheme: dark;
+  --bg: #101318;
+  --surface: #1a2029;
+  --line: #343d49;
+  --text: #f3f6fb;
+  --muted: #aab5c5;
+  --accent: #78e2bb;
+  font: 16px/1.45 system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); }
+main { width: min(100%, 640px); margin: auto; padding: 20px 16px max(24px, env(safe-area-inset-bottom)); }
+header, .library-header, .times { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+header { margin-bottom: 16px; }
+h1, h2, p { margin: 0; }
+h1 { font-size: 1.45rem; }
+h2 { font-size: 1.15rem; overflow-wrap: anywhere; }
+.eyebrow { margin-bottom: 5px; color: var(--accent); font-size: .78rem; letter-spacing: .05em; }
+.player { padding: 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 15px; }
+button, select, input { font: inherit; }
+button, select { min-height: 42px; border-radius: 10px; color: var(--text); }
+button { cursor: pointer; padding: 7px 12px; }
+.secondary, select { background: #222a35; border: 1px solid var(--line); }
+.primary { background: var(--accent); color: #10261e; border: 1px solid var(--accent); font-weight: 700; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+input[type="range"], input[type="checkbox"] { accent-color: var(--accent); }
+input[type="range"] { width: 100%; margin: 12px 0 0; min-height: 22px; }
+.times { color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
+.transport { display: grid; grid-template-columns: 1fr 1.2fr 1fr; gap: 8px; margin: 15px 0; }
+.settings { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: end; border-top: 1px solid var(--line); padding-top: 12px; }
+.settings label > span { display: block; color: var(--muted); font-size: .8rem; margin-bottom: 4px; }
+.settings select { padding: 5px; }
+.settings input[type="range"] { margin: 0; min-height: 42px; }
+.mute { min-height: 42px; display: flex; align-items: center; gap: 3px; white-space: nowrap; }
+.notice, .muted { color: var(--muted); font-size: .87rem; }
+.notice { margin: 12px 0; }
+.notice:empty { display: none; }
+.library { margin-top: 20px; }
+#search { width: 100%; min-height: 45px; margin: 12px 0 6px; padding: 9px 12px; background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: 10px; }
+.songs { margin: 0; padding: 0; list-style: none; }
+.songs li + li { border-top: 1px solid var(--line); }
+.song { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 46px; text-align: left; border: 0; background: transparent; overflow-wrap: anywhere; }
+.song-number { min-width: 2.2em; color: var(--muted); font-variant-numeric: tabular-nums; }
+.song[aria-current="true"] { color: var(--accent); background: #192d29; }
+#empty { padding: 16px 6px; }

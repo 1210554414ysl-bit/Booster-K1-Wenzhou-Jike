@@ -17,7 +17,9 @@ Threading model
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -84,9 +86,10 @@ def _fmt_time(seconds: float) -> str:
 class Track:
     """One playable local file."""
 
-    __slots__ = ("title", "location", "duration")
+    __slots__ = ("key", "title", "location", "duration")
 
     def __init__(self, title: str, location: str, duration: float = 0.0) -> None:
+        self.key = hashlib.blake2s(os.fsencode(location), digest_size=12).hexdigest()
         self.title = title
         self.location = location
         self.duration = duration
@@ -127,6 +130,7 @@ class MusicPlayerAgent(AgentBase):
         self._tracks: list[Track] = []
         self._index = -1
         self._shuffle_bag: list[int] = []
+        self._shuffle_history: list[int] = []
 
         self._handle = None
         self._generation = 0
@@ -134,11 +138,14 @@ class MusicPlayerAgent(AgentBase):
         self._paused = False
         self._offset = 0.0
         self._started_at = 0.0
+        self._started_epoch = 0.0
         self._duration = 0.0
         self._current: Optional[Track] = None
 
         self._params: dict[str, Any] = {}
         self._params_ready = False
+        self._catalog_json = "[]"
+        self._published_panel: dict[str, str] = {}
 
         self._ui: dict[str, Component] = {}
         self._last_status_text = ""
@@ -327,12 +334,17 @@ class MusicPlayerAgent(AgentBase):
         pm.add_parameter_callback("mute", self._on_mute_param)
         pm.add_parameter_callback("seek_percent", self._on_seek_param)
         pm.add_parameter_callback("play_mode", self._on_mode_param)
+        pm.add_parameter_callback("player_command", self._on_player_command)
 
-    def _write_param(self, name: str, value: Any) -> None:
+    def _write_param(self, name: str, value: Any) -> bool:
         try:
-            self.parameter_manager.set_parameter((name, value))
+            result = self.parameter_manager.set_parameter((name, value))
+            if result.successful:
+                return True
+            self.logger.warn(f"set param {name} failed: {result.reason}")
         except Exception as exc:
             self.logger.warn(f"set param {name} failed: {exc}")
+        return False
 
     def _refresh_parameter_values(self) -> None:
         self._write_param("volume", int(self._volume))
@@ -397,9 +409,37 @@ class MusicPlayerAgent(AgentBase):
             return
         with self._lock:
             self._mode = mode
-            self._shuffle_bag = []
+            self._shuffle_bag.clear()
+            self._shuffle_history.clear()
         self._save_settings()
         self._push_ui_state()
+
+    def _on_player_command(self, param) -> None:
+        try:
+            command = json.loads(param.as_string())
+        except (TypeError, ValueError):
+            return
+        if not isinstance(command, dict) or self._shutdown:
+            return
+        action = command.get("action")
+        if action == "play_pause":
+            self.on_play_pause(None)
+        elif action == "previous":
+            self.on_prev(None)
+        elif action == "next":
+            self.on_next(None)
+        elif action == "scan":
+            self.on_scan(None)
+        elif action == "select":
+            with self._lock:
+                index = next((i for i, track in enumerate(self._tracks) if track.key == command.get("track")), None)
+                if index is not None:
+                    self._select_track_locked(index)
+            self._push_ui_state()
+        elif action == "seek":
+            percent = command.get("percent")
+            if isinstance(percent, (int, float)) and math.isfinite(percent):
+                self._seek_to(percent, expected_track=command.get("track"))
 
     def _apply_volume(self, value_percent: int) -> None:
         target = max(0.0, min(1.0, float(value_percent) / 100.0))
@@ -420,7 +460,8 @@ class MusicPlayerAgent(AgentBase):
         with self._lock:
             idx = MODES.index(self._mode) if self._mode in MODES else 0
             self._mode = MODES[(idx + 1) % len(MODES)]
-            self._shuffle_bag = []
+            self._shuffle_bag.clear()
+            self._shuffle_history.clear()
             mode = self._mode
         self._write_param("play_mode", mode)
         self._save_settings()
@@ -479,7 +520,10 @@ class MusicPlayerAgent(AgentBase):
             if track is None:
                 if not self._tracks:
                     return LocaleString("Playlist is empty", "播放列表为空，请先添加音乐")
-                self._index = 0 if self._index < 0 else self._index
+                if self._mode == MODE_SHUFFLE:
+                    self._index = self._next_shuffle_index_locked()
+                elif self._index < 0:
+                    self._index = 0
                 track = self._tracks[self._index]
             if self._handle is not None or self._loading:
                 self._pause_locked()
@@ -532,6 +576,9 @@ class MusicPlayerAgent(AgentBase):
             seen.add(track.location)
             unique.append(track)
         with self._lock:
+            if [track.key for track in self._tracks] != [track.key for track in unique]:
+                self._shuffle_bag.clear()
+                self._shuffle_history.clear()
             self._tracks = unique
             if self._current is not None:
                 self._index = -1
@@ -542,7 +589,9 @@ class MusicPlayerAgent(AgentBase):
                         break
             elif self._index >= len(unique):
                 self._index = -1
-            self._shuffle_bag = []
+            self._catalog_json = json.dumps(
+                [[track.key, track.title] for track in unique], ensure_ascii=False, separators=(",", ":")
+            )
         self.logger.info(f"local scan: {len(unique)} track(s) under {root}")
         if refresh_ui:
             self._push_ui_state()
@@ -631,6 +680,7 @@ class MusicPlayerAgent(AgentBase):
                             return
                         self._handle = player
                         self._started_at = time.monotonic()
+                        self._started_epoch = time.time()
                         self._offset = offset
                         self._duration = duration
                         self._loading = False
@@ -738,9 +788,11 @@ class MusicPlayerAgent(AgentBase):
         self._generation += 1
         self._pending_playback = None
 
-    def _seek_to(self, percent: float) -> None:
+    def _seek_to(self, percent: float, expected_track: Optional[str] = None) -> None:
         with self._lock:
             if self._current is None or self._duration <= 0:
+                return
+            if expected_track is not None and self._current.key != expected_track:
                 return
             position = self._duration * (max(0.0, min(100.0, percent)) / 100.0)
             self._start_playback_locked(self._current, position)
@@ -775,24 +827,41 @@ class MusicPlayerAgent(AgentBase):
             self._toast_pending = LocaleString("Playlist is empty", "播放列表为空")
             return
         total = len(self._tracks)
-        if self._mode == MODE_SHUFFLE and step > 0 and not manual:
-            if not self._shuffle_bag:
-                self._shuffle_bag = list(range(total))
-                random.shuffle(self._shuffle_bag)
-                if self._shuffle_bag[0] == self._index:
-                    self._shuffle_bag.append(self._shuffle_bag.pop(0))
-            self._index = self._shuffle_bag.pop(0)
-        else:
-            next_index = self._index + step
-            if next_index >= total and not manual:
-                self._index = total - 1
-                self._current = None
-                self._duration = 0.0
+        if self._mode == MODE_SHUFFLE:
+            if step < 0:
+                if not self._shuffle_history:
+                    return
+                previous = self._shuffle_history.pop()
+                if self._index >= 0:
+                    self._shuffle_bag.append(self._index)
+                self._select_track_locked(previous, remember=False)
                 return
-            self._index = total - 1 if next_index < 0 else next_index % total
+            self._select_track_locked(self._next_shuffle_index_locked())
+            return
+        next_index = self._index + step
+        if next_index >= total and not manual:
+            self._index = total - 1
+            self._current = None
+            self._duration = 0.0
+            return
+        self._select_track_locked(total - 1 if next_index < 0 else next_index % total)
 
-        self._shuffle_bag = [index for index in self._shuffle_bag if index != self._index]
-        self._start_playback_locked(self._tracks[self._index], 0.0)
+    def _next_shuffle_index_locked(self) -> int:
+        if not self._shuffle_bag:
+            self._shuffle_bag = [index for index in range(len(self._tracks)) if index != self._index]
+            random.shuffle(self._shuffle_bag)
+        return self._shuffle_bag.pop() if self._shuffle_bag else 0
+
+    def _select_track_locked(self, index: int, remember: bool = True) -> None:
+        if self._mode == MODE_SHUFFLE:
+            if remember and self._index >= 0 and self._index != index:
+                self._shuffle_history.append(self._index)
+                if len(self._shuffle_history) > len(self._tracks):
+                    self._shuffle_history.pop(0)
+            if index in self._shuffle_bag:
+                self._shuffle_bag.remove(index)
+        self._index = index
+        self._start_playback_locked(self._tracks[index], 0.0)
     # ------------------------------------------------------------------
     # UI refresh
     # ------------------------------------------------------------------
@@ -866,6 +935,29 @@ class MusicPlayerAgent(AgentBase):
         self._set_toggle("local_play", playing, loading)
         self._set_toggle("local_mute", muted)
         self._set_icon("local_mode", self._mode_icon(mode), self._mode_text(mode, "zh"))
+        self._publish_player_panel()
+
+    def _publish_player_panel(self) -> None:
+        with self._lock:
+            current = self._current
+            panel_state = {
+                "track": current.key if current else "",
+                "title": current.title if current else "",
+                "duration": self._duration,
+                "offset": self._offset,
+                "started": self._started_epoch if self._handle is not None else 0,
+                "loading": self._loading,
+                "paused": self._paused,
+                "mode": self._mode,
+                "volume": self._volume,
+                "muted": self._muted,
+                "ready": self._params_ready,
+            }
+            catalog = self._catalog_json
+        status = json.dumps(panel_state, ensure_ascii=False, separators=(",", ":"))
+        for name, value in (("music_catalog", catalog), ("player_status", status)):
+            if self._published_panel.get(name) != value and self._write_param(name, value):
+                self._published_panel[name] = value
 
     def _set_toggle(self, key: str, state: bool, loading: bool = False) -> None:
         component = self._ui.get(key)

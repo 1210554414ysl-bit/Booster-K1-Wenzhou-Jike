@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>K1 音乐播放器</title>
+  <link rel="stylesheet" href="./player.css">
+  <script defer src="./player.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div><p class="eyebrow">BOOSTER K1</p><h1>音乐播放器</h1></div>
+      <button id="close" class="secondary" type="button">返回</button>
+    </header>
+    <section class="player" aria-label="播放控制">
+      <p class="eyebrow" id="playback-label">等待播放</p>
+      <h2 id="track-title">从下方歌单选一首歌</h2>
+      <input id="progress" type="range" min="0" max="100" step="0.1" value="0" aria-label="播放进度" disabled>
+      <div class="times"><span id="elapsed">00:00</span><span id="duration">00:00</span></div>
+      <div class="transport">
+        <button type="button" class="secondary" data-action="previous">上一首</button>
+        <button type="button" class="primary" id="toggle" data-action="play_pause">播放</button>
+        <button type="button" class="secondary" data-action="next">下一首</button>
+      </div>
+      <div class="settings">
+        <label><span>播放模式</span><select id="mode" disabled>
+          <option value="order">顺序播放</option>
+          <option value="shuffle">随机播放</option>
+          <option value="repeat_one">单曲循环</option>
+        </select></label>
+        <label><span>音量 <output id="volume-value">50%</output></span>
+          <input id="volume" type="range" min="0" max="100" step="1" value="50" disabled>
+        </label>
+        <label class="mute"><input id="mute" type="checkbox" disabled> 静音</label>
+      </div>
+    </section>
+    <p id="notice" class="notice" role="status">正在读取 K1 歌单…</p>
+    <section class="library" aria-labelledby="library-title">
+      <div class="library-header">
+        <div><h2 id="library-title">全部歌曲</h2><p id="song-count" class="muted"></p></div>
+        <button type="button" class="secondary" data-action="scan">刷新歌单</button>
+      </div>
+      <input id="search" type="search" placeholder="搜索歌名或歌手" aria-label="搜索歌名或歌手" autocomplete="off">
+      <p id="empty" class="muted" hidden></p>
+      <ol id="songs" class="songs"></ol>
+    </section>
+  </main>
+</body>
+</html>

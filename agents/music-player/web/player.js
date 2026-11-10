@@ -13,6 +13,7 @@ let state = {};
 let fetching = false;
 let saving = false;
 let previewingSeek = false;
+let seekTrack;
 let previewingVolume = false;
 let nonce = 0;
 let highlighted;
@@ -155,14 +156,23 @@ songList.addEventListener("click", (event) => {
   if (button) command("select", { track: button.dataset.track });
 });
 search.addEventListener("input", renderSongs);
+function clearSeekPreview() {
+  seekTrack = undefined;
+  previewingSeek = false;
+}
+progress.addEventListener("pointerdown", () => { seekTrack = state.track; });
+progress.addEventListener("pointerup", () => setTimeout(clearSeekPreview, 0));
+progress.addEventListener("pointercancel", clearSeekPreview);
 progress.addEventListener("input", () => {
-  previewingSeek = true;
+  seekTrack ??= state.track;
+  previewingSeek = seekTrack === state.track;
   renderProgress();
 });
 progress.addEventListener("change", () => {
   const percent = Number(progress.value);
-  previewingSeek = false;
-  command("seek", { track: state.track, percent });
+  const track = seekTrack ?? state.track;
+  clearSeekPreview();
+  if (track && track === state.track) command("seek", { track, percent });
 });
 volume.addEventListener("input", () => {
   previewingVolume = true;

@@ -848,9 +848,12 @@ class MusicPlayerAgent(AgentBase):
 
     def _next_shuffle_index_locked(self) -> int:
         if not self._shuffle_bag:
-            self._shuffle_bag = [index for index in range(len(self._tracks)) if index != self._index]
+            self._shuffle_bag = list(range(len(self._tracks)))
             random.shuffle(self._shuffle_bag)
-        return self._shuffle_bag.pop() if self._shuffle_bag else 0
+            if len(self._shuffle_bag) > 1 and self._shuffle_bag[-1] == self._index:
+                other = random.randrange(len(self._shuffle_bag) - 1)
+                self._shuffle_bag[other], self._shuffle_bag[-1] = self._shuffle_bag[-1], self._shuffle_bag[other]
+        return self._shuffle_bag.pop()
 
     def _select_track_locked(self, index: int, remember: bool = True) -> None:
         if self._mode == MODE_SHUFFLE:

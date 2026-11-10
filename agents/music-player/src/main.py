@@ -10,13 +10,9 @@ Plays mp3/wav files from the Agent private storage directory with:
 
 Threading model
 ---------------
-* Click callbacks NEVER call blocking SDK audio methods (play_sound / cancel).
-  cancel() waits for a Python state callback that needs the GIL, so calling it
-  from the click callback thread deadlocks.
-* One worker thread per playback owns its handle and polls for pause/stop via a
-  threading.Event; pause just flips state + sets the event.
-* Every framework call (update_component / publish_toast / force_update) is
-  serialized behind a single UI lock.
+* One worker owns the audio handle and cancels it before starting another.
+* Callbacks replace the pending playback request without waiting for audio I/O.
+* UI refreshes take the UI lock before reading playback state.
 """
 
 from __future__ import annotations
@@ -27,6 +23,7 @@ import random
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -73,8 +70,7 @@ UI_TICK_SEC = 1.0
 PARAM_SETTLE_SEC = 2.0
 FFMPEG_PROBE_TIMEOUT_SEC = 20.0
 FFMPEG_TRANSCODE_TIMEOUT_SEC = 180.0
-PLAYBACK_EXTRA_TIMEOUT_SEC = 30.0
-HANDLE_SETTLE_TIMEOUT_SEC = 5.0
+PLAYBACK_POLL_SEC = 0.2
 VOLUME_STEP_PERCENT = 10
 
 
@@ -121,7 +117,8 @@ class MusicPlayerAgent(AgentBase):
         # which is not thread-safe.
         self._ui_lock = threading.Lock()
         self._robot_lock = threading.RLock()
-        self._stop_event = threading.Event()
+        self._playback_changed = threading.Condition(self._lock)
+        self._pending_playback: Optional[tuple[int, Track, float]] = None
         self._shutdown = False
 
         # --- robot (lazy: motion services may not be ready at boot) --------
@@ -132,7 +129,6 @@ class MusicPlayerAgent(AgentBase):
         self._mode = MODE_ORDER
         self._volume = 50
         self._muted = False
-        self._last_nonzero_volume = 50
 
         self._tracks: list[Track] = []
         self._index = -1
@@ -152,9 +148,10 @@ class MusicPlayerAgent(AgentBase):
 
         self._ui: dict[str, Component] = {}
         self._last_status_text = ""
+        self._play_loading = False
         self._toast_pending: Optional[LocaleString] = None
 
-        self._cache_dir = Path(CACHE_DIR)
+        self._cache_dir = self._storage_root / CACHE_DIR
         self._music_dir = Path(MUSIC_DIR)
         self._ensure_dirs()
         self._load_settings()
@@ -164,6 +161,8 @@ class MusicPlayerAgent(AgentBase):
             self._scan_local(refresh_ui=False)
         except Exception as exc:
             self.logger.warn(f"initial scan failed: {exc}")
+        self._playback_thread = threading.Thread(target=self._playback_worker, daemon=True)
+        self._playback_thread.start()
 
     # ------------------------------------------------------------------
     # Bootstrap helpers
@@ -193,7 +192,6 @@ class MusicPlayerAgent(AgentBase):
                 self._mode = mode
             volume = int(data.get("volume", 50))
             self._volume = max(0, min(100, volume))
-            self._last_nonzero_volume = max(1, self._volume) if self._volume else 50
             self._muted = bool(data.get("muted", False))
             self.logger.info(
                 f"settings loaded: mode={self._mode} volume={self._volume} muted={self._muted}"
@@ -240,8 +238,10 @@ class MusicPlayerAgent(AgentBase):
             self._scan_local(refresh_ui=True)
             self._refresh_parameter_values()
             time.sleep(PARAM_SETTLE_SEC)
-            self._params_ready = True
+            if self._shutdown:
+                return
             self._refresh_parameter_values()
+            self._params_ready = True
             self._get_robot()
             self._apply_volume(0 if self._muted else self._volume)
             self._push_ui_state()
@@ -250,16 +250,15 @@ class MusicPlayerAgent(AgentBase):
 
     def on_agent_close(self) -> None:
         self.logger.info("MusicPlayerAgent closing")
-        with self._lock:
+        with self._playback_changed:
             self._shutdown = True
             self._generation += 1
-            handle = self._handle
+            self._pending_playback = None
             self._handle = None
-        self._stop_event.set()
-        if handle is not None:
-            threading.Thread(target=self._settle, args=(handle,), daemon=True).start()
+            self._playback_changed.notify()
+        # Give the audio worker a bounded chance to stop before process teardown.
+        self._playback_thread.join(timeout=1.0)
         self._save_settings()
-        self._cleanup_cache()
 
     # ------------------------------------------------------------------
     # UI construction (single local page)
@@ -353,16 +352,16 @@ class MusicPlayerAgent(AgentBase):
         except Exception:
             return
         with self._lock:
-            if value == self._volume and not self._muted:
+            if value == self._volume:
                 return
             self._volume = value
             was_muted = self._muted
             if value > 0:
-                self._last_nonzero_volume = value
                 self._muted = False
-        self._apply_volume(value)
-        if was_muted:
-            self._write_param("mute", False)
+            muted = self._muted
+        self._apply_volume(0 if muted else value)
+        if was_muted != muted:
+            self._write_param("mute", muted)
         self._save_settings()
         self._push_ui_state()
 
@@ -377,7 +376,7 @@ class MusicPlayerAgent(AgentBase):
             if muted == self._muted:
                 return
             self._muted = muted
-            target = 0 if muted else self._last_nonzero_volume
+            target = 0 if muted else self._volume
         self._apply_volume(target)
         self._push_ui_state()
         self._save_settings()
@@ -389,12 +388,7 @@ class MusicPlayerAgent(AgentBase):
             percent = float(param.as_float())
         except Exception:
             return
-        with self._lock:
-            track = self._current
-            duration = self._duration
-            if track is None or duration <= 0:
-                return
-        self._seek_to(duration * max(0.0, min(100.0, percent)) / 100.0)
+        self._seek_to(percent)
 
     def _on_mode_param(self, param) -> None:
         if not self._params_ready:
@@ -450,7 +444,7 @@ class MusicPlayerAgent(AgentBase):
         with self._lock:
             self._muted = not self._muted
             muted = self._muted
-            target = 0 if muted else self._last_nonzero_volume
+            target = 0 if muted else self._volume
         self._apply_volume(target)
         self._write_param("mute", muted)
         self._save_settings()
@@ -465,45 +459,43 @@ class MusicPlayerAgent(AgentBase):
 
     def _bump_volume(self, delta: int) -> Optional[LocaleString]:
         with self._lock:
+            was_muted = self._muted
             target = max(0, min(100, int(self._volume) + delta))
             self._volume = target
             if target > 0:
-                self._last_nonzero_volume = target
                 self._muted = False
             muted = self._muted
         self._apply_volume(0 if muted else target)
         self._write_param("volume", target)
-        if muted:
-            self._write_param("mute", False)
+        if was_muted != muted:
+            self._write_param("mute", muted)
         self._save_settings()
         self._push_ui_state()
         return LocaleString(f"Volume {target}%", f"音量 {target}%")
 
     def on_play_pause(self, component: Component) -> Optional[LocaleString]:
         with self._lock:
+            needs_scan = self._current is None and not self._tracks
+        if needs_scan:
+            self._scan_local(refresh_ui=False)
+        with self._lock:
             track = self._current
-            paused = self._paused
-            playing = self._handle is not None and not paused
-        if track is None:
-            if not self._tracks:
-                self._scan_local(refresh_ui=False)
-            if not self._tracks:
-                return LocaleString("Playlist is empty", "播放列表为空，请先添加音乐")
-            with self._lock:
+            if track is None:
+                if not self._tracks:
+                    return LocaleString("Playlist is empty", "播放列表为空，请先添加音乐")
                 self._index = 0 if self._index < 0 else self._index
                 track = self._tracks[self._index]
-            self._start_playback(track, 0.0)
-            return LocaleString("Playing", "开始播放")
-        if playing:
-            self._pause()
-            return LocaleString("Paused", "已暂停")
-        if paused:
-            with self._lock:
-                offset = self._offset
-            self._start_playback(track, offset)
-            return LocaleString("Resumed", "继续播放")
-        self._start_playback(track, 0.0)
-        return LocaleString("Playing", "开始播放")
+            if self._handle is not None or self._loading:
+                self._pause_locked()
+                message = LocaleString("Paused", "已暂停")
+            elif self._paused:
+                self._start_playback_locked(track, self._offset)
+                message = LocaleString("Resumed", "继续播放")
+            else:
+                self._start_playback_locked(track, 0.0)
+                message = LocaleString("Playing", "开始播放")
+        self._push_ui_state()
+        return message
 
     def on_prev(self, component: Component) -> Optional[LocaleString]:
         self._advance(step=-1, manual=True)
@@ -532,7 +524,8 @@ class MusicPlayerAgent(AgentBase):
                 continue
             try:
                 for path in self._iter_audio_files(base, MAX_SCAN_DEPTH):
-                    found.append(Track(title=path.stem, location=str(path), duration=0.0))
+                    if self._cache_dir not in path.parents:
+                        found.append(Track(title=path.stem, location=str(path), duration=0.0))
             except Exception as exc:
                 self.logger.warn(f"scan {base} failed: {exc}")
         seen: set[str] = set()
@@ -544,7 +537,14 @@ class MusicPlayerAgent(AgentBase):
             unique.append(track)
         with self._lock:
             self._tracks = unique
-            if self._index >= len(unique):
+            if self._current is not None:
+                self._index = -1
+                for index, track in enumerate(unique):
+                    if track.location == self._current.location:
+                        unique[index] = self._current
+                        self._index = index
+                        break
+            elif self._index >= len(unique):
                 self._index = -1
             self._shuffle_bag = []
         self.logger.info(f"local scan: {len(unique)} track(s) under {root}")
@@ -575,179 +575,148 @@ class MusicPlayerAgent(AgentBase):
     # ------------------------------------------------------------------
     # Playback engine
     # ------------------------------------------------------------------
-    def _start_playback(self, track: Track, offset: float) -> None:
-        with self._lock:
-            self._generation += 1
-            generation = self._generation
-            previous = self._handle
-            self._handle = None
-            self._current = track
-            self._loading = True
-            self._paused = False
-            self._offset = max(0.0, offset)
-            self._started_at = 0.0
-            self._duration = float(track.duration or 0.0)
-        self._stop_event.clear()
-        threading.Thread(
-            target=self._play_worker,
-            args=(generation, track, max(0.0, offset), previous),
-            daemon=True,
-        ).start()
-        self._push_ui_state()
+    def _start_playback_locked(self, track: Track, offset: float) -> None:
+        if self._shutdown:
+            return
+        self._generation += 1
+        self._handle = None
+        self._current = track
+        self._loading = True
+        self._paused = False
+        self._offset = max(0.0, offset)
+        self._started_at = 0.0
+        self._duration = track.duration
+        self._pending_playback = (self._generation, track, self._offset)
+        self._playback_changed.notify()
 
     def _is_current(self, generation: int) -> bool:
         with self._lock:
-            return (not self._shutdown) and self._generation == generation
+            return not self._shutdown and self._generation == generation
 
-    def _settle(self, handle) -> None:
-        """Cancel and wait for a handle to reach a terminal state (off-thread)."""
+    def _playback_worker(self) -> None:
+        while True:
+            with self._playback_changed:
+                self._playback_changed.wait_for(
+                    lambda: self._shutdown or self._pending_playback is not None
+                )
+                if self._shutdown:
+                    return
+                request = self._pending_playback
+                self._pending_playback = None
+            self._play_track(*request)
 
+    def _play_track(self, generation: int, track: Track, offset: float) -> None:
+        handle = None
+        cache = None
         try:
-            handle.cancel()
-            handle.wait(timeout=HANDLE_SETTLE_TIMEOUT_SEC)
-        except Exception as exc:
-            self.logger.warn(f"settle handle failed: {exc}")
-
-    def _play_worker(self, generation, track, offset, previous_handle) -> None:
-        try:
-            if previous_handle is not None:
-                self._settle(previous_handle)
-            source = self._prepare_source(track, offset)
-            if source is None:
-                raise RuntimeError("source unavailable")
+            source = Path(track.location)
+            if not source.is_file():
+                raise RuntimeError("audio file is missing")
+            duration = track.duration or self._probe_duration(source, generation)
             if not self._is_current(generation):
                 return
+            if duration > 0 and offset >= duration:
+                self._finish_playback(generation, succeeded=True)
+                return
+            if offset > 0.01:
+                cache = tempfile.TemporaryDirectory(
+                    dir=self._cache_dir, prefix="playback-", ignore_cleanup_errors=True
+                )
+                source = self._transcode(source, offset, Path(cache.name) / "track.wav", generation)
 
-            duration = float(track.duration or 0.0)
-            if duration <= 0:
-                duration = self._probe_duration(source)
-                with self._lock:
-                    if self._generation == generation:
-                        self._duration = duration
-                        track.duration = duration
-
+            if not self._is_current(generation):
+                return
             robot = self._get_robot()
             if robot is None:
                 raise RuntimeError("robot sdk not ready")
+            if not self._is_current(generation):
+                return
             handle = robot.play_sound(str(source))
             with self._lock:
                 if self._generation != generation or self._shutdown:
-                    stale = True
-                else:
-                    stale = False
-                    self._handle = handle
-                    self._started_at = time.monotonic()
-                    self._offset = offset
-                    self._loading = False
-            if stale:
-                self._settle(handle)
-                return
+                    return
+                self._handle = handle
+                self._started_at = time.monotonic()
+                self._offset = offset
+                self._duration = duration
+                self._loading = False
+                track.duration = duration
 
             self._push_ui_state()
-
-            # Poll so pause/stop can interrupt without cancelling on the
-            # callback thread.
-            while True:
-                with self._lock:
-                    if self._generation != generation or self._shutdown:
-                        return
-                if self._stop_event.is_set():
-                    break
-                if handle.done():
-                    break
-                handle.wait(timeout=0.25)
-
-            if self._stop_event.is_set():
-                with self._lock:
-                    self._handle = None
-                self._settle(handle)
+            while self._is_current(generation) and not handle.done():
+                handle.wait(timeout=PLAYBACK_POLL_SEC)
+            if not self._is_current(generation):
                 return
-
-            self._on_track_finished(generation)
+            if handle.status == "FAILED":
+                raise RuntimeError(f"audio SDK failed: {handle.error}")
+            self._finish_playback(generation, succeeded=handle.status == "SUCCEEDED")
         except Exception as exc:
-            self.logger.error(
-                f"playback failed ({track.title}): {exc.__class__.__name__}: {exc}"
-            )
-            with self._lock:
-                current = self._generation == generation
-                if current:
-                    self._loading = False
-            if current:
-                self._toast_pending = LocaleString(
-                    "Cannot play: damaged file / unsupported format",
-                    "无法播放：文件损坏 / 格式不支持",
+            if self._is_current(generation):
+                self.logger.error(f"playback failed ({track.title}): {exc.__class__.__name__}: {exc}")
+                self._finish_playback(
+                    generation,
+                    succeeded=False,
+                    error=LocaleString("Unable to play this track", "无法播放这首歌"),
                 )
-                self._push_ui_state()
+        finally:
+            if handle is not None:
+                self._settle(handle)
+            if cache is not None:
+                cache.cleanup()
 
-    def _prepare_source(self, track: Track, offset: float) -> Optional[Path]:
-        path = Path(track.location)
-        if not path.is_file():
-            return None
-        if offset <= 0.01:
-            return path
-        return self._transcode(str(path), offset)
-
-    def _ffmpeg(self) -> Optional[str]:
-        return shutil.which("ffmpeg")
-
-    def _transcode(self, source: str, offset: float) -> Optional[Path]:
-        ffmpeg = self._ffmpeg()
-        if ffmpeg is None:
-            # No ffmpeg: cannot seek, but can restart the track from the start.
-            path = Path(source)
-            if path.is_file():
-                if offset > 0.01:
-                    self.logger.warn(
-                        "ffmpeg missing; restarting the track from the beginning "
-                        "instead of seeking"
-                    )
-                return path
-            return None
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
-        target = self._cache_dir / "current_track.wav"
-        command = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
-        if offset > 0.01:
-            command += ["-ss", f"{offset:.3f}"]
-        command += [
-            "-i", str(source),
-            "-ac", str(PCM_CHANNELS),
-            "-ar", str(PCM_SAMPLE_RATE),
-            "-c:a", "pcm_s16le",
-            "-f", "wav",
-            str(target),
-        ]
+    def _settle(self, handle) -> None:
         try:
-            subprocess.run(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                timeout=FFMPEG_TRANSCODE_TIMEOUT_SEC,
-                check=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            detail = (exc.stderr or b"").decode("utf-8", "replace")[:300]
-            self.logger.warn(f"ffmpeg transcode failed: {detail}")
-            return None
+            if not handle.done():
+                handle.cancel()
+            while not handle.done() and not self._shutdown:
+                handle.wait(timeout=PLAYBACK_POLL_SEC)
         except Exception as exc:
-            self.logger.warn(f"ffmpeg transcode error: {exc}")
-            return None
-        if target.is_file() and target.stat().st_size > 44:
-            return target
-        return None
+            self.logger.warn(f"settle handle failed: {exc}")
 
-    def _probe_duration(self, path) -> float:
-        ffmpeg = self._ffmpeg()
+    def _run_ffmpeg(self, arguments: list[str], generation: int, timeout: float) -> tuple[int, bytes]:
+        ffmpeg = shutil.which("ffmpeg")
         if ffmpeg is None:
-            return 0.0
+            raise RuntimeError("ffmpeg is unavailable")
+        command = [ffmpeg, "-nostdin", "-hide_banner", *arguments]
+        deadline = time.monotonic() + timeout
+        with subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as process:
+            try:
+                while self._is_current(generation):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    try:
+                        _, stderr = process.communicate(timeout=min(remaining, PLAYBACK_POLL_SEC))
+                        return process.returncode, stderr
+                    except subprocess.TimeoutExpired:
+                        continue
+                return 0, b""
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+
+    def _transcode(self, source: Path, offset: float, target: Path, generation: int) -> Path:
+        returncode, stderr = self._run_ffmpeg(
+            [
+                "-y", "-loglevel", "error", "-ss", f"{offset:.3f}", "-i", str(source),
+                "-ac", str(PCM_CHANNELS), "-ar", str(PCM_SAMPLE_RATE),
+                "-c:a", "pcm_s16le", "-f", "wav", str(target),
+            ],
+            generation,
+            FFMPEG_TRANSCODE_TIMEOUT_SEC,
+        )
+        if self._is_current(generation) and (
+            returncode != 0 or not target.is_file() or target.stat().st_size <= 44
+        ):
+            detail = stderr.decode("utf-8", "replace")[:300]
+            raise RuntimeError(f"ffmpeg could not seek: {detail}")
+        return target
+
+    def _probe_duration(self, path: Path, generation: int) -> float:
         try:
-            completed = subprocess.run(
-                [ffmpeg, "-hide_banner", "-i", str(path)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                timeout=FFMPEG_PROBE_TIMEOUT_SEC,
-            )
-            text = (completed.stderr or b"").decode("utf-8", "replace")
-            match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", text)
+            _, stderr = self._run_ffmpeg(["-i", str(path)], generation, FFMPEG_PROBE_TIMEOUT_SEC)
+            match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", stderr.decode("utf-8", "replace"))
             if match:
                 hours, minutes, seconds = match.groups()
                 return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
@@ -758,94 +727,80 @@ class MusicPlayerAgent(AgentBase):
     def _position_locked(self) -> float:
         if self._handle is None or self._paused:
             return self._offset
-        elapsed = time.monotonic() - self._started_at
-        position = self._offset + max(0.0, elapsed)
+        position = self._offset + max(0.0, time.monotonic() - self._started_at)
         if self._duration > 0:
             return min(self._duration, position)
         return position
 
     def _seek_percent(self) -> float:
         with self._lock:
-            duration = self._duration
-        if duration <= 0:
-            return 0.0
-        return max(0.0, min(100.0, self._position_locked() / duration * 100.0))
+            if self._duration <= 0:
+                return 0.0
+            return max(0.0, min(100.0, self._position_locked() / self._duration * 100.0))
 
-    def _pause(self) -> None:
+    def _pause_locked(self) -> None:
+        self._offset = self._position_locked()
+        self._paused = True
+        self._loading = False
+        self._handle = None
+        self._generation += 1
+        self._pending_playback = None
+
+    def _seek_to(self, percent: float) -> None:
         with self._lock:
-            if self._handle is None or self._paused:
+            if self._current is None or self._duration <= 0:
                 return
-            self._paused = True
-            self._offset = self._position_locked()
-        self._stop_event.set()
+            position = self._duration * (max(0.0, min(100.0, percent)) / 100.0)
+            self._start_playback_locked(self._current, position)
         self._push_ui_state()
 
-    def _seek_to(self, position: float) -> None:
-        with self._lock:
-            track = self._current
-            duration = self._duration
-        if track is None:
-            return
-        position = max(0.0, min(duration if duration > 0 else position, position))
-        self._start_playback(track, position)
-
-    def _on_track_finished(self, generation: int) -> None:
+    def _finish_playback(
+        self, generation: int, succeeded: bool, error: Optional[LocaleString] = None
+    ) -> None:
         with self._lock:
             if self._generation != generation or self._shutdown:
                 return
             self._handle = None
+            self._loading = False
             self._paused = False
             self._offset = 0.0
-            mode = self._mode
-        if mode == MODE_REPEAT_ONE:
-            track = self._current
-            if track is not None:
-                self._start_playback(track, 0.0)
-                return
-        self._advance(step=1, manual=False)
+            if error is not None:
+                self._toast_pending = error
+            if succeeded:
+                if self._mode == MODE_REPEAT_ONE and self._current is not None:
+                    self._start_playback_locked(self._current, 0.0)
+                else:
+                    self._advance_locked(step=1, manual=False)
+        self._push_ui_state()
 
     def _advance(self, step: int, manual: bool) -> None:
         with self._lock:
-            if not self._tracks:
-                self._toast_pending = LocaleString("Playlist is empty", "播放列表为空")
-                return
-            total = len(self._tracks)
-            mode = self._mode
-
-            if mode == MODE_SHUFFLE and step > 0 and not manual:
-                if not self._shuffle_bag:
-                    self._shuffle_bag = list(range(total))
-                    random.shuffle(self._shuffle_bag)
-                    if self._shuffle_bag and self._shuffle_bag[0] == self._index:
-                        self._shuffle_bag.append(self._shuffle_bag.pop(0))
-                next_index = self._shuffle_bag.pop(0)
-                self._index = next_index
-            else:
-                next_index = self._index + step
-                if next_index >= total:
-                    if manual:
-                        next_index = 0
-                    else:
-                        self._index = total - 1
-                        self._stop_internal()
-                        return
-                elif next_index < 0:
-                    next_index = total - 1
-                self._index = next_index
-
-            track = self._tracks[self._index]
-            self._shuffle_bag = [i for i in self._shuffle_bag if i != self._index]
-        self._start_playback(track, 0.0)
-
-    def _stop_internal(self) -> None:
-        with self._lock:
-            self._generation += 1
-            self._handle = None
-            self._paused = False
-            self._offset = 0.0
-            self._current = None
+            self._advance_locked(step, manual)
         self._push_ui_state()
 
+    def _advance_locked(self, step: int, manual: bool) -> None:
+        if not self._tracks:
+            self._toast_pending = LocaleString("Playlist is empty", "播放列表为空")
+            return
+        total = len(self._tracks)
+        if self._mode == MODE_SHUFFLE and step > 0 and not manual:
+            if not self._shuffle_bag:
+                self._shuffle_bag = list(range(total))
+                random.shuffle(self._shuffle_bag)
+                if self._shuffle_bag[0] == self._index:
+                    self._shuffle_bag.append(self._shuffle_bag.pop(0))
+            self._index = self._shuffle_bag.pop(0)
+        else:
+            next_index = self._index + step
+            if next_index >= total and not manual:
+                self._index = total - 1
+                self._current = None
+                self._duration = 0.0
+                return
+            self._index = total - 1 if next_index < 0 else next_index % total
+
+        self._shuffle_bag = [index for index in self._shuffle_bag if index != self._index]
+        self._start_playback_locked(self._tracks[self._index], 0.0)
     # ------------------------------------------------------------------
     # UI refresh
     # ------------------------------------------------------------------
@@ -867,15 +822,16 @@ class MusicPlayerAgent(AgentBase):
             duration = self._duration
             paused = self._paused
             loading = self._loading
+            playing = self._handle is not None
+            position = self._position_locked()
         if track is None:
             if not tracks:
                 return "未在播放 · 歌单为空"
             return f"未在播放 · 共 {len(tracks)} 首"
-        prefix = "▶" if not paused else "⏸"
+        prefix = "⏸" if paused else ("▶" if playing else "■")
         if loading:
             prefix = "…"
         total = duration if duration > 0 else (track.duration or 0.0)
-        position = self._position_locked()
         counter = f"{index + 1}/{len(tracks)}" if tracks and index >= 0 else "-"
         return f"{prefix} {counter} {track.title[:16]}  {_fmt_time(position)}/{_fmt_time(total)}"
 
@@ -922,12 +878,16 @@ class MusicPlayerAgent(AgentBase):
             changed = bool(component.state) != state
             if changed:
                 component.state = state
-            try:
-                component.set_selection_ring_loading(loading)
-            except Exception:
-                pass
-            if changed or loading:
+            loading_changed = key == "local_play" and self._play_loading != loading
+            if loading_changed:
+                try:
+                    component.set_selection_ring_loading(loading)
+                except AttributeError:
+                    pass
+            if changed or loading_changed:
                 self.component_manager.update_component(component)
+                if loading_changed:
+                    self._play_loading = loading
         except Exception as exc:
             self.logger.warn(f"set toggle {key} failed: {exc}")
 
@@ -950,19 +910,3 @@ class MusicPlayerAgent(AgentBase):
             MODE_SHUFFLE: "res/mode_shuffle.png",
             MODE_REPEAT_ONE: "res/mode_repeat.png",
         }.get(mode, "res/mode_order.png")
-
-    # ------------------------------------------------------------------
-    # Cache cleanup
-    # ------------------------------------------------------------------
-    def _cleanup_cache(self) -> None:
-        try:
-            cache = self._storage_root / self._cache_dir
-            if cache.is_dir():
-                for entry in os.scandir(cache):
-                    if entry.is_file() and entry.name.startswith("current_track"):
-                        try:
-                            os.remove(entry.path)
-                        except OSError:
-                            pass
-        except Exception as exc:
-            self.logger.warn(f"cleanup cache failed: {exc}")

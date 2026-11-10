@@ -1,5 +1,5 @@
 id = "com.wenzhoujike.k1.music"
-version = "1.2.0"
+version = "1.2.1"
 name = { en = "Music Player", zh = "音乐播放器" }
 logo = "/res/logo.png"
 description = "Local music player for Booster K1: playlist, play modes, seek, system volume."

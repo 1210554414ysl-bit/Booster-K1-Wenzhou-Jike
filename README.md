@@ -72,15 +72,13 @@ Booster-K1-Wenzhou-Jike/
 │   └── 05-versioning.md            # ⭐ 版本管理与回滚（装坏了怎么救）
 ├── scripts/
 │   └── release.ps1                 # 一键发布：归档 .agent + 提交 + 打 tag
-├── agents/
-│   ├── README.md                   # 新增 Agent 的目录约定与检查清单
-│   ├── music-player/               # 播放器源码、网页面板和安装包
-│   │   ├── src/main.py             # 歌单、播放和音量控制逻辑
-│   │   ├── web/                    # 歌单与进度面板源码
-│   │   └── resources/music_panel.zip  # 部署到 K1 的面板资源
-│   └── volume-adjustment/          # 音量调节 Agent 源码和安装包
-└── assets/
-    └── booster-studio.png          # Booster Studio 账号页截图
+└── agents/
+    ├── README.md                   # 新增 Agent 的目录约定与检查清单
+    ├── music-player/               # 播放器源码、网页面板和安装包
+    │   ├── src/main.py             # 歌单、播放和音量控制逻辑
+    │   ├── web/                    # 歌单与进度面板源码
+    │   └── resources/music_panel.zip  # 部署到 K1 的面板资源
+    └── volume-adjustment/          # 音量调节 Agent 源码和安装包
 ```
 
 ---

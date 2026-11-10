@@ -22,8 +22,6 @@
 1. 打开 <https://studio.booster.tech/cn/> 下载对应系统的 Booster Studio
 2. 安装后启动，使用 Booster 账号登录（首次登录会进入「账户」页，确认昵称与邮箱无误）
 
-![Booster Studio 账号页](../assets/booster-studio.png)
-
 > Booster Studio 内置了完整的开发、运行与调试环境，并附带标准 Agent 项目模板，**不需要自己从零搭环境**。
 
 ---

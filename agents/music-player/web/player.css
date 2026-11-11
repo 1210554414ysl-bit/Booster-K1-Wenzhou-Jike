@@ -38,6 +38,11 @@ input[type="range"] { width: 100%; margin: 12px 0 0; min-height: 22px; }
 .notice:empty { display: none; }
 .library { margin-top: 20px; }
 #search { width: 100%; min-height: 45px; margin: 12px 0 6px; padding: 9px 12px; background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: 10px; }
+.upload-panel { display: grid; gap: 8px; margin: 8px 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.upload-panel input { max-width: 100%; }
+.upload-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.upload-panel progress { width: 100%; accent-color: var(--accent); }
+.upload-panel p:empty { display: none; }
 .songs { margin: 0; padding: 0; list-style: none; }
 .songs li + li { border-top: 1px solid var(--line); }
 .song { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 46px; text-align: left; border: 0; background: transparent; overflow-wrap: anywhere; }

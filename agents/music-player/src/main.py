@@ -25,13 +25,14 @@ import re
 import secrets
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Optional
-from urllib.parse import urlsplit
+from typing import Any, BinaryIO, Optional
+from urllib.parse import parse_qs, urlsplit
 
 from booster_agent_framework import (
     AgentBase,
@@ -76,6 +77,7 @@ FFMPEG_PROBE_TIMEOUT_SEC = 20.0
 PLAYBACK_POLL_SEC = 0.2
 PLAYBACK_STOP_SEC = 0.5
 VOLUME_STEP_PERCENT = 10
+MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 
 
 def _fmt_time(seconds: float) -> str:
@@ -89,7 +91,7 @@ def _fmt_time(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def _serve_panel(dispatch) -> tuple[ThreadingHTTPServer, str]:
+def _serve_panel(dispatch, upload) -> tuple[ThreadingHTTPServer, str]:
     content_types = {
         "/": "text/html; charset=utf-8",
         "/player.css": "text/css; charset=utf-8",
@@ -115,6 +117,7 @@ def _serve_panel(dispatch) -> tuple[ThreadingHTTPServer, str]:
     # The URL acts as a capability. The server shares no files outside the bundle.
     prefix = f"/music/{secrets.token_urlsafe(24)}"
     command_lock = threading.Lock()
+    upload_lock = threading.Lock()
 
     class PanelHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -126,7 +129,11 @@ def _serve_panel(dispatch) -> tuple[ThreadingHTTPServer, str]:
             self._respond(assets[route], content_types[route])
 
         def do_POST(self) -> None:
-            if urlsplit(self.path).path != prefix + "/api":
+            url = urlsplit(self.path)
+            if url.path == prefix + "/upload":
+                self._handle_upload(parse_qs(url.query).get("name", [""])[0])
+                return
+            if url.path != prefix + "/api":
                 self.send_error(404)
                 return
             try:
@@ -146,8 +153,28 @@ def _serve_panel(dispatch) -> tuple[ThreadingHTTPServer, str]:
                     result = dispatch(message)
             self._respond(json.dumps(result, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
-        def _respond(self, content: bytes, content_type: str) -> None:
-            self.send_response(200)
+        def _handle_upload(self, name: str) -> None:
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                size = 0
+            if size > MAX_UPLOAD_BYTES:
+                result, status = {"success": False, "message": "单个文件最多 64 MB。"}, 413
+            elif size <= 0 or self.headers.get_content_type() != "application/octet-stream":
+                result, status = {"success": False, "message": "请选择有效的 MP3 文件。"}, 400
+            elif not upload_lock.acquire(blocking=False):
+                result, status = {"success": False, "message": "有歌曲正在上传，请稍后重试。"}, 409
+            else:
+                try:
+                    self.connection.settimeout(15)
+                    result = upload(name, self.rfile, size)
+                    status = 201 if result["success"] else 400
+                finally:
+                    upload_lock.release()
+            self._respond(json.dumps(result, ensure_ascii=False).encode(), "application/json; charset=utf-8", status)
+
+        def _respond(self, content: bytes, content_type: str, status: int = 200) -> None:
+            self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(content)))
             self.send_header("Cache-Control", "no-store")
@@ -198,6 +225,7 @@ class MusicPlayerAgent(AgentBase):
         self._ui_changed = threading.Event()
         self._robot_lock = threading.RLock()
         self._playback_changed = threading.Condition(self._lock)
+        self._scan_lock = threading.Lock()
         self._pending_playback: Optional[tuple[int, Track, float]] = None
         self._shutdown = False
 
@@ -410,7 +438,7 @@ class MusicPlayerAgent(AgentBase):
             [prev_btn, play_btn, next_btn, mode_btn, mute_btn, vol_down, vol_up, scan_btn],
         )
         try:
-            self._panel_server, url = _serve_panel(self._on_panel_request)
+            self._panel_server, url = _serve_panel(self._on_panel_request, self._upload_mp3)
             panel = OnlineWebviewComponent(
                 "music_panel", LocaleString("Library & Progress", "歌单与进度"),
                 "res/tab_local.png", url, None, ComponentOrientation.kLANDSCAPE,
@@ -666,6 +694,10 @@ class MusicPlayerAgent(AgentBase):
     # Playlist
     # ------------------------------------------------------------------
     def _scan_local(self, refresh_ui: bool) -> int:
+        with self._scan_lock:
+            return self._scan_files(refresh_ui)
+
+    def _scan_files(self, refresh_ui: bool) -> int:
         root = self._storage_root
         found: list[Track] = []
         for base in (root / MUSIC_DIR, root):
@@ -703,6 +735,60 @@ class MusicPlayerAgent(AgentBase):
         if refresh_ui:
             self._push_ui_state()
         return len(unique)
+
+    def _upload_mp3(self, name: str, source: BinaryIO, size: int) -> dict:
+        name = name.strip()
+        filename = Path(name)
+        if (
+            filename.suffix.lower() != ".mp3" or len(name.encode("utf-8")) > 220
+            or any(char in "/\\" or ord(char) < 32 or ord(char) == 127 for char in name)
+        ):
+            return {"success": False, "message": "文件名无效，请选择普通的 .mp3 文件。"}
+
+        music = self._storage_root / self._music_dir
+        temporary = None
+        try:
+            music.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=music, prefix=".upload-", suffix=".part", delete=False) as file:
+                temporary = Path(file.name)
+                remaining = size
+                while remaining:
+                    chunk = source.read(min(remaining, 256 * 1024))
+                    if not chunk:
+                        raise OSError("upload ended before the whole file arrived")
+                    file.write(chunk)
+                    remaining -= len(chunk)
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=format_name:stream=codec_name,codec_type",
+                 "-of", "json", "-i", str(temporary)],
+                capture_output=True, timeout=12, check=False,
+            )
+            details = json.loads(probe.stdout or b"{}")
+            if (
+                probe.returncode != 0 or details.get("format", {}).get("format_name") != "mp3"
+                or not any(stream.get("codec_name") == "mp3" and stream.get("codec_type") == "audio"
+                           for stream in details.get("streams", []))
+            ):
+                return {"success": False, "message": "这个文件无法识别为 MP3 音频。"}
+            temporary.chmod(0o644)
+            target = music / name
+            suffix = 2
+            while not self._shutdown:
+                try:
+                    os.link(temporary, target)
+                except FileExistsError:
+                    target = music / f"{filename.stem} ({suffix}){filename.suffix}"
+                    suffix += 1
+                else:
+                    self._scan_local(refresh_ui=True)
+                    return {"success": True, "track": Track(target.stem, str(target)).key, "title": target.stem}
+            return {"success": False, "message": "播放器正在重启，请稍后重试。"}
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            self.logger.warn(f"MP3 upload failed: {exc}")
+            return {"success": False, "message": "上传没完成，请检查连接后重试。"}
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _iter_audio_files(base: Path, max_depth: int):

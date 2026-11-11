@@ -42,6 +42,16 @@
         <button type="button" class="secondary" data-action="scan" disabled>刷新歌单</button>
       </div>
       <input id="search" type="search" placeholder="搜索歌名或歌手" aria-label="搜索歌名或歌手" autocomplete="off">
+      <div class="upload-panel">
+        <label for="mp3-file">从手机添加 MP3</label>
+        <input id="mp3-file" type="file" accept=".mp3,audio/mpeg">
+        <div class="upload-actions">
+          <button type="button" class="secondary" id="upload" disabled>上传</button>
+          <button type="button" class="secondary" id="upload-play" disabled>上传并播放</button>
+        </div>
+        <progress id="upload-progress" max="100" aria-label="MP3 上传进度" hidden></progress>
+        <p id="upload-status" class="muted" role="status"></p>
+      </div>
       <p id="empty" class="muted" hidden></p>
       <ol id="songs" class="songs"></ol>
     </section>

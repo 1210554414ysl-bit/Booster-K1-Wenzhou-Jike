@@ -4,6 +4,9 @@ const volume = get("volume");
 const search = get("search");
 const songList = get("songs");
 const notice = get("notice");
+const mp3File = get("mp3-file");
+const uploadProgress = get("upload-progress");
+const uploadStatus = get("upload-status");
 const collator = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
 const normalize = (value) => value.normalize("NFKC").toLocaleLowerCase();
 
@@ -13,6 +16,7 @@ let state = {};
 let stateReceivedAt = 0;
 let fetching = false;
 let saving = false;
+let uploading = false;
 let previewingSeek = false;
 let seekTrack;
 let previewingVolume = false;
@@ -140,17 +144,84 @@ async function send(message) {
     notice.textContent = "";
   } catch (error) {
     notice.textContent = "操作没成功，请重试。";
-    return;
+    return false;
   } finally {
     saving = false;
   }
   refresh();
+  return true;
 }
 
 function command(name, extra = {}) {
   commands = commands.then(() => send({ command: name, ...extra }));
   return commands;
 }
+
+function updateUploadButtons() {
+  get("upload").disabled = get("upload-play").disabled = uploading || !mp3File.files.length;
+}
+
+function uploadFile(file) {
+  return new Promise((resolve, reject) => {
+    const url = new URL("upload", window.location.href);
+    url.searchParams.set("name", file.name);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.responseType = "json";
+    xhr.timeout = 5 * 60 * 1000;
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        const percent = Math.round(event.loaded * 100 / event.total);
+        uploadProgress.value = percent;
+        uploadStatus.textContent = percent < 100 ? `正在上传 ${percent}%` : "正在检查 MP3…";
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status === 201 && xhr.response?.success) resolve(xhr.response);
+      else reject(new Error(xhr.response?.message || "上传没完成，请重试。"));
+    };
+    xhr.onerror = xhr.ontimeout = () => reject(new Error("上传连接中断，请重试。"));
+    xhr.send(file);
+  });
+}
+
+async function uploadSelected(playAfter) {
+  const file = mp3File.files[0];
+  if (!file || uploading) return;
+  if (!/\.mp3$/i.test(file.name) || !file.size || file.size > 64 * 1024 * 1024) {
+    uploadStatus.textContent = "请选择不超过 64 MB 的 MP3 文件。";
+    return;
+  }
+  uploading = true;
+  mp3File.disabled = true;
+  updateUploadButtons();
+  uploadProgress.hidden = false;
+  uploadProgress.value = 0;
+  uploadStatus.textContent = "正在上传…";
+  try {
+    const result = await uploadFile(file);
+    mp3File.value = "";
+    const playing = playAfter && await command("select", { track: result.track });
+    uploadStatus.textContent = playing ? `已上传并开始播放《${result.title}》`
+      : playAfter ? `已上传《${result.title}》，请从歌单点播。` : `已加入歌单《${result.title}》`;
+    refresh();
+  } catch (error) {
+    uploadStatus.textContent = error.message;
+  } finally {
+    uploadProgress.hidden = true;
+    mp3File.disabled = false;
+    uploading = false;
+    updateUploadButtons();
+  }
+}
+
+mp3File.addEventListener("change", () => {
+  uploadStatus.textContent = "";
+  updateUploadButtons();
+});
+get("upload").addEventListener("click", () => uploadSelected(false));
+get("upload-play").addEventListener("click", () => uploadSelected(true));
 
 document.querySelectorAll("[data-action]").forEach((button) => {
   button.addEventListener("click", () => command(button.dataset.action));

@@ -1,0 +1,8 @@
+backend/node_modules/
+resources/python/
+resources/netease/
+online_music_accounts.json
+qq-device.json
+music_player_settings.json
+*.unsigned.agent
+*.p12

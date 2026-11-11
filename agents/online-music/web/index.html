@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>K1 在线音乐</title>
+  <link rel="stylesheet" href="./player.css">
+  <script defer src="./player.js"></script>
+</head>
+<body>
+  <main>
+    <header><h1>在线音乐</h1><button id="close" class="secondary" type="button">返回</button></header>
+    <section class="source-panel" aria-label="音乐平台">
+      <label for="provider">音乐平台</label>
+      <select id="provider"><option value="netease">网易云音乐</option><option value="qq">QQ 音乐</option></select>
+      <span id="account-status" class="muted">未登录</span>
+      <button id="login" class="secondary" type="button">扫码登录</button>
+      <button id="logout" class="secondary" type="button" hidden>退出登录</button>
+    </section>
+    <section class="player" aria-label="播放控制">
+      <p class="eyebrow" id="playback-label">等待播放</p>
+      <h2 id="track-title">搜索并选择一首歌</h2>
+      <input id="progress" type="range" min="0" max="100" step="0.1" value="0" aria-label="播放进度" disabled>
+      <div class="times"><span id="elapsed">00:00</span><span id="duration">00:00</span></div>
+      <div class="transport">
+        <button type="button" class="secondary" data-action="previous" disabled>上一首</button>
+        <button type="button" class="primary" id="toggle" data-action="play_pause" disabled>播放</button>
+        <button type="button" class="secondary" data-action="next" disabled>下一首</button>
+      </div>
+      <div class="settings">
+        <label><span>播放模式</span><select id="mode" disabled><option value="order">顺序播放</option><option value="shuffle">随机播放</option><option value="repeat_one">单曲循环</option></select></label>
+        <label><span>音量 <output id="volume-value">50%</output></span><input id="volume" type="range" min="0" max="100" step="1" value="50" disabled></label>
+        <label class="mute"><input id="mute" type="checkbox" disabled> 静音</label>
+      </div>
+      <p id="playback-error" class="error" role="alert"></p>
+    </section>
+    <section class="library" aria-label="点歌">
+      <form id="search-form"><input id="search" type="search" placeholder="搜索歌名或歌手" aria-label="搜索歌名或歌手" maxlength="160" autocomplete="off" required><button id="search-button" class="primary" type="submit">搜索</button></form>
+      <nav class="tabs" aria-label="歌曲列表"><button id="results-tab" class="secondary" type="button" aria-pressed="true">搜索结果</button><button id="playlists-tab" class="secondary" type="button" aria-pressed="false">我的歌单</button><button id="queue-tab" class="secondary" type="button" aria-pressed="false">播放队列</button></nav>
+      <p id="notice" class="notice" role="status">输入歌名开始搜索</p>
+      <div class="library-header"><h2 id="list-title">搜索结果</h2><span id="song-count" class="muted"></span></div>
+      <button id="back-playlists" class="secondary" type="button" hidden>返回歌单</button>
+      <ol id="songs" class="songs"></ol>
+      <button id="load-more" class="secondary" type="button" hidden>加载更多</button>
+    </section>
+    <dialog id="login-dialog" aria-labelledby="login-title">
+      <div class="library-header"><h2 id="login-title">网易云扫码登录</h2><button id="close-login" class="secondary" type="button">关闭</button></div>
+      <img id="qr-image" alt="登录二维码" hidden>
+      <p id="qr-status" role="status">正在获取二维码…</p>
+      <p class="muted">可长按保存二维码，再用对应 App 的扫一扫从相册识别。</p>
+      <button id="retry-login" class="secondary" type="button" hidden>重新获取二维码</button>
+    </dialog>
+  </main>
+</body>
+</html>

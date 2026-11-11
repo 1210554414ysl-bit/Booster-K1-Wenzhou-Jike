@@ -1,0 +1,8 @@
+{
+  "name": "k1-online-music-provider",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "@neteasecloudmusicapienhanced/api": "4.41.1"
+  }
+}

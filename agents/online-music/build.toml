@@ -1,0 +1,9 @@
+[platform]
+supports = [ "real_jetson" ]
+
+[python]
+pip_repos = [ "https://pypi.org/simple" ]
+obfuscation = false
+
+[python.dependencies]
+common = [ "qqmusic-api-python==0.8.2" ]

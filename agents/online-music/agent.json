@@ -1,0 +1,33 @@
+{
+  "id": "com.wenzhoujike.k1.onlinemusic",
+  "version": "0.1.2",
+  "description": "Online QQ Music and NetEase Cloud Music player for Booster K1.",
+  "logo": "/res/logo.png",
+  "entry": "src/main.py:OnlineMusicAgent",
+  "debuggable": true,
+  "gait": "default",
+  "requirements": {
+    "models": [
+      "Booster K1"
+    ],
+    "min_api_level": 10700,
+    "nvidia_jetpack_main_versions": [],
+    "qti_qnn_main_versions": [],
+    "compile_api_level": 10800,
+    "platforms": [
+      "real_jetson"
+    ]
+  },
+  "package_type": "python",
+  "ros2": {
+    "package_name": "com_wenzhoujike_k1_onlinemusic",
+    "launch_file": "launch.py"
+  },
+  "locale_name": {
+    "en": "Online Music",
+    "zh": "在线音乐"
+  },
+  "app_image": {
+    "icon": "/res/logo.png"
+  }
+}

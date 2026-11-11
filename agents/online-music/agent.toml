@@ -1,0 +1,39 @@
+id = "com.wenzhoujike.k1.onlinemusic"
+version = "0.1.2"
+name = { en = "Online Music", zh = "在线音乐" }
+logo = "/res/logo.png"
+description = "Online QQ Music and NetEase Cloud Music player for Booster K1."
+entry = "src/main.py:OnlineMusicAgent"
+debuggable = true
+
+[requirements]
+min_api_level = 10700
+models = [ "Booster K1" ]
+
+[component_shortcuts]
+version = "1.0"
+
+[[component_shortcuts.shortcut_list]]
+id = "play_pause"
+shortcut = [ "A" ]
+locale_name = { en = "Play / Pause", zh = "播放/暂停" }
+
+[[component_shortcuts.shortcut_list]]
+id = "prev"
+shortcut = [ "X" ]
+locale_name = { en = "Previous", zh = "上一首" }
+
+[[component_shortcuts.shortcut_list]]
+id = "next"
+shortcut = [ "B" ]
+locale_name = { en = "Next", zh = "下一首" }
+
+[[component_shortcuts.shortcut_list]]
+id = "mute"
+shortcut = [ "Y" ]
+locale_name = { en = "Mute", zh = "静音" }
+
+[[component_shortcuts.shortcut_list]]
+id = "mode"
+shortcut = [ "LB", "A" ]
+locale_name = { en = "Play Mode", zh = "播放模式" }

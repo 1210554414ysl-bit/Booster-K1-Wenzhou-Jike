@@ -1,0 +1,56 @@
+{
+    "version": "1.0",
+    "shortcut_list": [
+        {
+            "id": "play_pause",
+            "shortcut": [
+                "A"
+            ],
+            "locale_name": {
+                "en": "Play / Pause",
+                "zh": "播放/暂停"
+            }
+        },
+        {
+            "id": "prev",
+            "shortcut": [
+                "X"
+            ],
+            "locale_name": {
+                "en": "Previous",
+                "zh": "上一首"
+            }
+        },
+        {
+            "id": "next",
+            "shortcut": [
+                "B"
+            ],
+            "locale_name": {
+                "en": "Next",
+                "zh": "下一首"
+            }
+        },
+        {
+            "id": "mute",
+            "shortcut": [
+                "Y"
+            ],
+            "locale_name": {
+                "en": "Mute",
+                "zh": "静音"
+            }
+        },
+        {
+            "id": "mode",
+            "shortcut": [
+                "LB",
+                "A"
+            ],
+            "locale_name": {
+                "en": "Play Mode",
+                "zh": "切换播放模式"
+            }
+        }
+    ]
+}

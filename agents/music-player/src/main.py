@@ -67,7 +67,7 @@ MODES = (MODE_ORDER, MODE_SHUFFLE, MODE_REPEAT_ONE)
 SETTINGS_FILE = Path("music_player_settings.json")
 MUSIC_DIR = Path("music")
 CACHE_DIR = Path("cache")
-PANEL_BUNDLE = Path("resources/music_panel.zip")
+PANEL_BUNDLE = Path("res/music_panel.zip")
 AUDIO_EXTS = (".mp3", ".wav")
 MAX_SCAN_DEPTH = 4
 

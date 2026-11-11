@@ -16,7 +16,7 @@
 | Agent | 目录 | 功能 | 版本 | 手柄快捷键 |
 | --- | --- | --- | --- | --- |
 | 音量调节 | [`agents/volume-adjustment`](agents/volume-adjustment/README.md) | 读取 / 增大 / 减小 / 静音机器人系统音量 | 1.0.0 | `A` 音量+ ・ `B` 音量- ・ `Y` 静音 |
-| 音乐播放器 | [`agents/music-player`](agents/music-player/README.md) | 本地 MP3 / WAV、完整歌单、按文件名搜索、进度跳转与系统音量 | 1.2.1（源码） | `A` 播放暂停 ・ `X` 上一首 ・ `B` 下一首 ・ `Y` 静音 ・ `LB+A` 切模式 |
+| 音乐播放器 | [`agents/music-player`](agents/music-player/README.md) | 本地 MP3 / WAV、完整歌单、按文件名搜索、进度跳转与系统音量 | 1.2.1 | `A` 播放暂停 ・ `X` 上一首 ・ `B` 下一首 ・ `Y` 静音 ・ `LB+A` 切模式 |
 | 在线音乐 | [`agents/online-music`](agents/online-music/README.md) | 网易云扫码登录、个人歌单和在线播放，QQ 公共搜索 | 0.1.2 | `A` 播放暂停 ・ `X` 上一首 ・ `B` 下一首 ・ `Y` 静音 ・ `LB+A` 切模式 |
 
 ## 音乐播放器怎么用
@@ -29,7 +29,7 @@
 
 要从手机加歌，在「歌单与进度」的 **从手机添加 MP3** 里选择文件，再点 **上传** 或 **上传并播放**。单个文件最多 64 MB，同名文件会另存。
 
-**版本说明** · `main` 提供 1.2.1 的源码和面板资源。仓库现有的音乐播放器 `.agent` 安装包是 1.2.0。通过安装包升级到新版时，需要重新构建包含 `resources/music_panel.zip` 的签名包。
+**当前版本** · [下载本地音乐播放器 1.2.1 签名安装包](agents/music-player/com.wenzhoujike.k1.music-1.2.1.agent)。已包含歌单、搜索、进度条和手机 MP3 上传面板，沿用旧版签名证书。源码、面板资源与安装包已同步。
 
 ---
 
@@ -92,7 +92,7 @@ Booster-K1-Wenzhou-Jike/
     ├── music-player/               # 播放器源码、网页面板和安装包
     │   ├── src/main.py             # 歌单、播放和音量控制逻辑
     │   ├── web/                    # 歌单与进度面板源码
-    │   └── resources/music_panel.zip  # 部署到 K1 的面板资源
+    │   └── res/music_panel.zip      # 随安装包部署到 K1 的面板资源
     ├── online-music/               # 在线音乐源码、网页面板与已签名安装包
     └── volume-adjustment/          # 音量调节 Agent 源码和安装包
 ```

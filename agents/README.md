@@ -75,5 +75,5 @@ cp <你的工程>/build/*.agent      agents/<agent-name>/
 | 目录 | 功能 | 版本 |
 | --- | --- | --- |
 | [`volume-adjustment`](volume-adjustment/README.md) | 机器人系统音量读取 / 增减 / 静音 | 1.0.0 |
-| [`music-player`](music-player/README.md) | 在线直链 + 本地歌单，三种播放模式、进度跳转、系统音量 | 1.0.0 |
+| [`music-player`](music-player/README.md) | 本地歌单、搜索点歌、实时进度、音量与手机 MP3 上传 | 1.2.1 |
 | [`online-music`](online-music/README.md) | 网易云登录、歌单与在线播放，QQ 公共搜索 | 0.1.2 |

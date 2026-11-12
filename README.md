@@ -18,6 +18,7 @@
 | 音量调节 | [`agents/volume-adjustment`](agents/volume-adjustment/README.md) | 读取 / 增大 / 减小 / 静音机器人系统音量 | 1.0.0 | `A` 音量+ ・ `B` 音量- ・ `Y` 静音 |
 | 本地音乐播放器 | [`agents/music-player`](agents/music-player/README.md) | 本地 MP3 / WAV、完整歌单、按文件名搜索、进度跳转与系统音量 | 1.2.1 | `A` 播放暂停 ・ `X` 上一首 ・ `B` 下一首 ・ `Y` 静音 ・ `LB+A` 切模式 |
 | 在线音乐 | [`agents/online-music`](agents/online-music/README.md) | 网易云扫码登录、个人歌单和在线播放，QQ 公共搜索 | 0.1.2 | `A` 播放暂停 ・ `X` 上一首 ・ `B` 下一首 ・ `Y` 静音 ・ `LB+A` 切模式 |
+| 默认模式＋音乐 | [`agents/default-music`](agents/default-music/README.md) | 只读复用原默认模式，附加本地／在线音乐和手机上传；仅适配已核验的默认实现 | 0.1.0 | 保留默认动作快捷键，音乐在网页操作 |
 
 ## 本地音乐播放器怎么用
 
@@ -42,6 +43,14 @@
 支持暂停续播、上一首和下一首、顺序播放、随机播放、单曲循环、进度跳转、系统音量和静音。QQ 音乐提供公共搜索，公开音频能否播放取决于平台返回的播放地址。网易云歌曲的播放权限取决于当前账号。
 
 已在 Jetson ARM64 K1 上验证安装、网易云个人歌单、在线音频输出及播放控制。完整用法和构建说明见[在线音乐 Agent](agents/online-music/README.md)。
+
+---
+
+## 默认模式＋音乐怎么用
+
+新增独立 Agent「默认模式＋音乐」，保留原默认 Agent，打开「本地与在线音乐」使用两个音源。新包只读继承已安装的默认实现，原文件不修改；其兼容性受原实现校验限制。当前只支持已验证的 Jetson K1，不能泛称所有固件通用。
+
+[使用、下载与验证范围](agents/default-music/README.md)。音乐入口已由用户确认可使用；基础运动、动作和新账号登录后的在线播放仍需现场验收。
 
 ---
 
@@ -85,6 +94,7 @@ Booster-K1-Wenzhou-Jike/
     │   ├── web/                    # 歌单与进度面板源码
     │   └── res/music_panel.zip      # 随安装包部署到 K1 的面板资源
     ├── online-music/               # 在线音乐源码、网页面板与已签名安装包
+    ├── default-music/              # 默认模式＋音乐的独立扩展包
     └── volume-adjustment/          # 音量调节 Agent 源码和安装包
 ```
 

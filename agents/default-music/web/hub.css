@@ -1,0 +1,5 @@
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#101419;color:#f5f7fa}
+body{margin:0}header,nav{display:flex;gap:12px;align-items:center;padding:12px 18px}header{justify-content:space-between}
+button{background:#252e39;color:inherit;border:1px solid #485362;border-radius:10px;padding:12px 20px;font:inherit;cursor:pointer}
+button[aria-pressed=true]{background:#75dfba;color:#10251c;border-color:#75dfba}p{font-size:13px;color:#acb8c5;margin:0 18px 10px}
+iframe{display:block;width:100%;height:calc(100dvh - 160px);min-height:450px;border:0}iframe[hidden]{display:none}

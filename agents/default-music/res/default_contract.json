@@ -1,0 +1,113 @@
+{
+  "id": "com.boosterobotics.default",
+  "version": "1.0.0",
+  "files": {
+    "__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "default_agent.py": "361a28231a4203c2e3ece54188be63375116dce1cb5a16bc457b8d5418d39f1a",
+    "constants.py": "6101f01402560bfd0f8224c9f6df994180bc8df563824d97c854cf21df5cbd99",
+    "sdk_compat.py": "a854ba4fb257397200e26ffb2461da257ee74294ac512aea7459919b41e7cbeb",
+    "agent_profile.py": "a6da529983e18200594debb4eee0d003d0161ac05757a2afd4b4d38b5e395ccc"
+  },
+  "skill_refs": [
+    {
+      "skill_id": "com.boosterobotics.skill.shake_hand",
+      "display_sequence": 1,
+      "shortcut": [
+        "A"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.wave",
+      "display_sequence": 2,
+      "shortcut": [
+        "B"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.carry",
+      "display_sequence": 4,
+      "shortcut": [
+        "RB",
+        "Y"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.rock_dance",
+      "display_sequence": 5,
+      "shortcut": [
+        "LB",
+        "LEFT"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.new_year_dance",
+      "display_sequence": 6,
+      "shortcut": [
+        "LB",
+        "UP"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.future_dance",
+      "display_sequence": 7,
+      "shortcut": [
+        "LB",
+        "RIGHT"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.dabbing",
+      "display_sequence": 8,
+      "shortcut": [
+        "RB",
+        "B"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.ultraman",
+      "display_sequence": 9,
+      "shortcut": [
+        "X"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.respect",
+      "display_sequence": 10,
+      "shortcut": [
+        "Y"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.cheer",
+      "display_sequence": 11,
+      "shortcut": [
+        "RB",
+        "X"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.lucky_cat",
+      "display_sequence": 12,
+      "shortcut": [
+        "RB",
+        "A"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.lie_down",
+      "display_sequence": 15,
+      "shortcut": [
+        "LT",
+        "DOWN"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.chest_salute",
+      "display_sequence": 18,
+      "shortcut": [
+        "LB",
+        "X"
+      ]
+    }
+  ]
+}

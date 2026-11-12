@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>默认模式＋音乐</title>
+  <link rel="stylesheet" href="./hub.css">
+  <script defer src="./hub.js"></script>
+</head>
+<body>
+  <header><strong>默认模式＋音乐</strong><button id="close" type="button">返回控制界面</button></header>
+  <nav aria-label="音乐来源">
+    <button id="local" type="button" aria-pressed="true">本地音乐</button>
+    <button id="online" type="button" aria-pressed="false">在线音乐</button>
+  </nav>
+  <p>两个页面共用播放控制；点选歌曲后切换音源。返回控制界面可继续使用基础操作。</p>
+  <iframe id="local-frame" src="./local/" title="本地音乐"></iframe>
+  <iframe id="online-frame" title="在线音乐" hidden></iframe>
+</body>
+</html>

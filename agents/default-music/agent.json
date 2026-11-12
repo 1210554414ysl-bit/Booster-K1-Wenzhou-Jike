@@ -1,0 +1,135 @@
+{
+  "id": "com.wenzhoujike.k1.defaultmusic",
+  "version": "0.1.0",
+  "description": "Independent default-mode Agent with local and online music.",
+  "logo": "/res/logo.png",
+  "entry": "src/main.py:DefaultMusicAgent",
+  "debuggable": true,
+  "gait": "default",
+  "requirements": {
+    "models": [
+      "Booster K1"
+    ],
+    "min_api_level": 10800,
+    "nvidia_jetpack_main_versions": [],
+    "qti_qnn_main_versions": [],
+    "compile_api_level": 10800,
+    "platforms": [
+      "real_jetson"
+    ]
+  },
+  "package_type": "python",
+  "ros2": {
+    "package_name": "com_wenzhoujike_k1_defaultmusic",
+    "launch_file": "launch.py"
+  },
+  "locale_name": {
+    "en": "Booster + Music",
+    "zh": "默认模式＋音乐"
+  },
+  "app_image": {
+    "icon": "/res/logo.png"
+  },
+  "skill_refs": [
+    {
+      "skill_id": "com.boosterobotics.skill.shake_hand",
+      "display_sequence": 1,
+      "shortcut": [
+        "A"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.wave",
+      "display_sequence": 2,
+      "shortcut": [
+        "B"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.carry",
+      "display_sequence": 4,
+      "shortcut": [
+        "RB",
+        "Y"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.rock_dance",
+      "display_sequence": 5,
+      "shortcut": [
+        "LB",
+        "LEFT"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.new_year_dance",
+      "display_sequence": 6,
+      "shortcut": [
+        "LB",
+        "UP"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.future_dance",
+      "display_sequence": 7,
+      "shortcut": [
+        "LB",
+        "RIGHT"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.dabbing",
+      "display_sequence": 8,
+      "shortcut": [
+        "RB",
+        "B"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.ultraman",
+      "display_sequence": 9,
+      "shortcut": [
+        "X"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.respect",
+      "display_sequence": 10,
+      "shortcut": [
+        "Y"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.cheer",
+      "display_sequence": 11,
+      "shortcut": [
+        "RB",
+        "X"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.lucky_cat",
+      "display_sequence": 12,
+      "shortcut": [
+        "RB",
+        "A"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.lie_down",
+      "display_sequence": 15,
+      "shortcut": [
+        "LT",
+        "DOWN"
+      ]
+    },
+    {
+      "skill_id": "com.boosterobotics.skill.chest_salute",
+      "display_sequence": 18,
+      "shortcut": [
+        "LB",
+        "X"
+      ]
+    }
+  ]
+}

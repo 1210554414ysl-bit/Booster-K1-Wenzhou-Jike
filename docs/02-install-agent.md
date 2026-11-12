@@ -9,6 +9,7 @@
 | 本地音乐播放器 1.2.1 | [下载 .agent](https://raw.githubusercontent.com/1210554414ysl-bit/Booster-K1-Wenzhou-Jike/main/agents/music-player/com.wenzhoujike.k1.music-1.2.1.agent) | 231563 |
 | 在线音乐 0.1.2 | [下载 .agent](https://raw.githubusercontent.com/1210554414ysl-bit/Booster-K1-Wenzhou-Jike/main/agents/online-music/com.wenzhoujike.k1.onlinemusic-0.1.2.agent) | 87492211 |
 | 音量调节 1.0.0 | [下载 .agent](https://raw.githubusercontent.com/1210554414ysl-bit/Booster-K1-Wenzhou-Jike/main/agents/volume-adjustment/com.example.volumeagent-1.0.0.agent) | 以下载文件为准 |
+| 默认模式＋音乐 0.1.0 | [下载 .agent](https://raw.githubusercontent.com/1210554414ysl-bit/Booster-K1-Wenzhou-Jike/main/agents/default-music/com.wenzhoujike.k1.defaultmusic-0.1.0.agent) | 87503792 |
 
 保留 `.agent` 后缀，无需解压。不要将 GitHub 文件展示页另存为安装包，也不要安装 `.unsigned.agent`。下载整个仓库后构建是另一种开发流程，见 [开发说明](03-develop-agent.md)。
 

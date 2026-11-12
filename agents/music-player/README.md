@@ -1,10 +1,10 @@
-# 音乐播放器 · Music Player
+# 本地音乐播放器 · Music Player
 
 Booster K1 本地音乐 Agent，当前发布版本 **1.2.1**。在 Booster App 中播放机器人里的 MP3 / WAV，浏览完整歌单、搜索点歌，并从手机上传 MP3。
 
 ## 安装与使用
 
-1. 下载 [1.2.1 签名安装包](com.wenzhoujike.k1.music-1.2.1.agent)，通过 Booster Studio 安装到 K1。
+1. 下载 [1.2.1 签名安装包](https://raw.githubusercontent.com/1210554414ysl-bit/Booster-K1-Wenzhou-Jike/main/agents/music-player/com.wenzhoujike.k1.music-1.2.1.agent)，按[单包安装说明](../../docs/02-install-agent.md)安装到 K1。App 中显示名称为「音乐播放器」。
 2. 在 Booster App 左上角选择「音乐播放器」。手机与机器人须在同一局域网。
 3. 点击「歌单与进度」，从完整歌单点选歌曲，也可以输入歌名或文件名里的歌手名搜索。
 4. 播放时显示已播时间和总时长；可暂停续播、拖动进度条、切歌、调整系统音量和静音。
@@ -28,7 +28,7 @@ Booster K1 本地音乐 Agent，当前发布版本 **1.2.1**。在 Booster App �
 /opt/booster/booster_agent_data/data/agent_storage/com.wenzhoujike.k1.music/music/
 ```
 
-其他系统版本以日志中 `local scan: N track(s) under ...` 输出的存储根目录为准。首次启动会创建目录，手机上传也写入这里。通过文件传输加歌后，在面板点「刷新歌单」。扫描支持子目录，最大深度为 4。
+安装包不会附带你的歌曲，换机器人后需重新传入。其他系统版本以日志中 `local scan: N track(s) under ...` 输出的存储根目录为准。首次启动会创建目录，手机上传也写入这里。通过文件传输加歌后，在面板点「刷新歌单」。扫描支持子目录，最大深度为 4。
 
 ## 主控按钮和快捷键
 
@@ -47,9 +47,9 @@ Booster K1 本地音乐 Agent，当前发布版本 **1.2.1**。在 Booster App �
 - Booster K1，最低 Agent API Level `10700`，本包由 API `10800` SDK 构建；建议固件 1.8.0 及以上并提供 `boosteros`。
 - 机器人需要 `ffmpeg`、`ffprobe` 和可用的 PulseAudio 输出。播放进程由单个后台线程管理，切歌和暂停不会在按钮回调中等待音频进程。
 - 手机须能访问机器人的局域网地址；机器人 IP 改变后重新打开 Agent。页面地址包含临时访问令牌，不要转发给无关设备。
-- 本 Agent 播放本地文件，在线播放使用独立的 [在线音乐 Agent](../online-music/README.md)。
+- 播放机器人里已保存的文件无需平台账号或公网；手机浏览歌单和上传文件需要可访问机器人的局域网连接。
 - 安装包保留 ARM64 / x86_64 启动器，声明支持 Jetson、Qcom 和两种仿真平台；Qcom 真机仍待验证。
-- 此次发布完成官方构建、签名和包内容校验，以及模拟 SDK 下的真实 FFmpeg、浏览器上传回归。机器人关机，尚未对这次重打包进行新的真机安装验收。
+- 1.2.1 发布时完成官方构建、签名和包内容校验，以及模拟 SDK 下的真实 FFmpeg、浏览器上传回归。本次重打包的真机覆盖安装与手机 App 验收仍待单独记录，模拟通过不代表这些检查已完成。
 
 ## 构建与资源
 

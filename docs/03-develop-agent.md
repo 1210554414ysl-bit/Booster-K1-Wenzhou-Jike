@@ -1,333 +1,52 @@
-# 03 · 开发自己的 K1 Agent
+# 03 · 开发与构建 K1 Agent
 
-> **目标**：从零写一个能在 K1 上跑的 Agent，并打包成 `.agent`。
-> **官方章节**：[快速上手：5 步构建自定义 Agent](https://docs.booster.tech/zh-CN/docs/developer-guide/agent-development/quick-start/) ・ [配置与发布](https://docs.booster.tech/zh-CN/docs/developer-guide/agent-development/configuration-and-release/configuration-files-and-options/) ・ [API 组成与使用](https://docs.booster.tech/zh-CN/docs/developer-guide/agent-development/api/overview/)
+本章说明本仓库的实际开发入口。SDK 接口与配置语法以 [官方快速上手](https://docs.booster.tech/zh-CN/docs/developer-guide/agent-development/quick-start/) 和 [配置说明](https://docs.booster.tech/zh-CN/docs/developer-guide/agent-development/configuration-and-release/configuration-files-and-options/) 为准。
 
----
+## 目录和运行配置
 
-## 1. 项目结构
-
-在 Booster Studio 中基于模板创建工程，标准结构如下：
-
-```
-example_agent/
-├── agent.toml          # 运行配置（ID、版本、名称、入口、依赖要求）
-├── build.toml          # 构建配置（目标平台、Python 依赖、签名）
-├── src/
-│   └── main.py         # Agent 入口代码（组件、回调）
-├── res/                # 资源文件（图标等）
-└── build/              # 构建产物（自动生成）
-    └── example-1.0.0.agent
+```text
+agents/<agent-name>/
+├── agent.toml          # 包 ID、版本、显示名称、入口、快捷键
+├── build.toml          # 平台、依赖、构建配置
+├── src/                # Python 源码
+├── res/                # 官方工具收录的项目资源
+└── README.md           # 使用、构建、验证范围
 ```
 
-> **不要手写 `build/` 目录**，它由 Studio 构建生成。
+`agent.json` 是运行清单，当前目录中的清单供对照；发布时必须与包内清单一致。修改功能后同步版本、构建产物和文档，保持包 ID 稳定。
 
----
+## 各 Agent 的构建方式
 
-## 2. `agent.toml`：运行配置
-
-### 2.1 基本信息
-
-| 配置项 | 说明 |
+| Agent | 方式 |
 | --- | --- |
-| `id` | 唯一标识，建议反向域名，如 `com.example.my_agent` |
-| `version` | 版本号，参与生成 `.agent` 包名，并在 App 里展示 |
-| `name` | 显示名称，多语言，**必须含 `en`** |
-| `logo` | 相对项目根目录的图标路径，**文件必须存在** |
-| `description` | 简要介绍 |
-| `entry` | 入口，格式 `文件路径:类名`，该类必须继承 `AgentBase` |
-| `debuggable` | 可选，`true` 时调试模式启动会开 Python 调试服务 |
-| `requirements.min_api_level` | 兼容的最低 API Level |
-| `requirements.models` | 支持的机型，至少一个，如 `["Booster K1"]` |
+| 本地音乐播放器 | 在其目录执行 `python scripts/build_panel.py`，生成 `res/music_panel.zip`，再用 Studio 构建和签名 |
+| 在线音乐 | 按其 README 准备 ARM64 Node、Python wheels、npm 依赖，再运行 `scripts/build_release.py`，最后用原证书签名 |
+| 音量调节 | 本仓库整理原项目源码及成品包，未提供完整的 `agent.toml` / `build.toml` 工程；重建前应取回原工程或按 SDK 模板补齐配置 |
 
-最小可用示例：
+在线音乐的 `resources/` 由自定义打包脚本收录。官方构建工具与自定义打包脚本对资源目录的处理不同，不能假设把文件放在项目任意位置都会进入安装包。
 
-```toml
-id = "com.example.my_agent"
-version = "1.0.0"
-name = { en = "ExampleAgent", zh = "示例" }
-logo = "res/logo.png"
-description = "Example Python Agent"
-entry = "src/main.py:ExampleAgent"
+## 平台与依赖
 
-[requirements]
-min_api_level = 10800
-models = ["Booster K1"]
-```
+`build.toml` 的 `[platform].supports` 声明允许的平台。现有在线包只声明 `real_jetson`，其运行时和二进制依赖为 Linux ARM64 / Python 3.10 准备。扩展平台需要核对启动器、Python ABI、Node 和系统库，并重新验证；只添加平台名不足以完成移植。
 
-> ⚠️ `requirements.models` 的机型必须与当前连接的机器人在**同一 Ubuntu 版本族**：K1/T1 只能从 K1、T1 里选；T2/T2 Hand 只能从这两者里选。
+`requirements.min_api_level` 是最低声明，`compile_api_level` 表示构建 SDK 的 API。使用新接口时检查实际 SDK 支持，不能仅凭固件或 Studio 的版本号推算兼容性。
 
-### 2.2 手柄快捷键（可选）
+## 回调、播放与状态
 
-先在 `agent.toml` 注册快捷键，再在代码里通过 `shortcut_id` 引用：
+- 点击回调尽快返回，耗时下载、解码和等待由后台任务处理，避免锁与 SDK 回调相互等待。
+- 本地播放器用单个工作线程管理 FFmpeg 音频进程；界面状态由独立更新线程发布。
+- 在线播放器在复用播放逻辑的基础上增加平台解析和 FFmpeg 流进度处理。
+- 存储通过 `storage_manager` 获取，避免把某台机器人的绝对目录或 IP 写死到功能代码中。
+- 框架的线程与组件接口以当前 SDK 为准。参考已有代码时，也要核对其目标 API 和验证范围。
 
-```toml
-[component_shortcuts]
-version = "1.0"
+## 签名与更新
 
-[[component_shortcuts.shortcut_list]]
-id = "wave"
-shortcut = ["A"]
-locale_name = { en = "Wave", zh = "挥手" }
-```
+Studio 可以使用其配置的调试证书；直接调用构建工具时需要提供签名配置。在线音乐使用独立证书，后续同 ID 升级须沿用该证书。本地音乐 1.2.1 沿用 1.2.0 的 SDK 调试证书。
 
-| 字段 | 含义 |
-| --- | --- |
-| `id` | 快捷键唯一标识，对应代码里的 `shortcut_id` |
-| `shortcut` | 1~3 个按键的列表 |
-| `locale_name` | 显示名称，必须含 `en` |
+私钥、PKCS#12 文件和密码保存在仓库之外。重新从源码构建并换用自己的签名，不保证能覆盖安装同 ID 的已发布包。详见 [官方签名说明](https://docs.booster.tech/zh-CN/docs/developer-guide/agent-development/configuration-and-release/signing-and-certificates/)。
 
-**按键限制**（容易踩坑）：
+## 验证与发布
 
-- ❌ 不可用系统保留键：`BACK`、`START`、`LS`、`RS`
-- ❌ 当前不支持的键：`CENTER`、`LEFT_UP`、`LEFT_DOWN`、`RIGHT_UP`、`RIGHT_DOWN`
-- 完整合法按键名见官方 [按键列表](https://docs.booster.tech/zh-CN/docs/developer-guide/agent-development/api/joystick-and-shortcuts/basic-types/#joystickkey)
+至少记录代码提交、包版本、签名验证结果、包内容、目标平台和测试结果。模拟检查、真机安装、实际音频输出、手机 App 操作分别记录。未测试的项目标记待验证。
 
----
-
-## 3. `build.toml`：构建配置
-
-```toml
-[platform]
-supports = ["sim_x86_64", "sim_aarch64", "real_jetson", "real_qcom"]
-
-[python]
-pip_repos = ["https://pypi.org/simple"]
-obfuscation = false
-
-[python.dependencies]
-common = ["numpy==1.21.5"]
-```
-
-| 配置项 | 说明 |
-| --- | --- |
-| `platform.supports` | 目标平台列表；省略 `[platform]` 时按当前构建环境自动选择 |
-| `python.pip_repos` | pip 源；`dir:` 开头表示项目内本地 wheel 目录 |
-| `python.obfuscation` | 是否混淆源码（只降低可读性，**不能真正防逆向**） |
-| `python.dependencies.common` | 全平台共用依赖，标准 pip 语法 |
-| `python.dependencies.<平台名>` | 仅该平台的依赖 |
-
-> 🚩 **极客版注意**：`real_qcom` 是 **K1 极客版**专用平台。如果团队里既有教育/专业版（`real_jetson`）又有极客版，`supports` 里两个都要写，否则另一类机器装不上。
-
-### 签名（可选）
-
-Studio ≥ 1.13 支持 `[sign]` 节。不配置时使用通用 debug 证书，正式发布建议配置专属证书：
-
-```toml
-[sign]
-keystore_path = "..."
-keystore_pass = "..."
-```
-
-详见官方 [签名与证书](https://docs.booster.tech/zh-CN/docs/developer-guide/agent-development/configuration-and-release/signing-and-certificates/)。
-
-> ⚠️ 密钥库和密码**不要提交到仓库**，本仓库的 `.gitignore` 已忽略 `*.keystore` / `*.jks` / `*.pem` / `*.key` / `.env`。
-
----
-
-## 4. 写入口类
-
-入口类继承 `booster_agent_framework.AgentBase`，在 `__init__` 里初始化机器人客户端和 UI：
-
-```python
-from booster_agent_framework import AgentBase, AgentFeatures
-from boosteros.robots.booster import BoosterRobot
-
-
-class ExampleAgent(AgentBase):
-    def __init__(self) -> None:
-        super().__init__(AgentFeatures(enable_auto_getup=True))
-        self.robot = BoosterRobot()
-        self.setup_components()
-
-    def setup_components(self) -> None:
-        ...
-```
-
-**生命周期回调**：
-
-| 回调 | 时机 | 典型用途 |
-| --- | --- | --- |
-| `on_agent_activated()` | Agent 被激活 | 读取初始状态、刷新 UI |
-| `on_agent_close()` | Agent 正在关闭 | 保存状态、释放资源 |
-
-```python
-def on_agent_activated(self) -> None:
-    self.logger.info("activated")
-
-def on_agent_close(self) -> None:
-    self.logger.info("closing")
-```
-
----
-
-## 5. 组件（Component）与回调
-
-组件是「App 上能看到的按钮」，也是「点击事件的入口」。
-
-```python
-from booster_agent_framework import Component, LocaleString
-
-def on_wave_click(self, component: Component) -> LocaleString | None:
-    self.robot.do_action("hand_wave")
-    return LocaleString("Waving started", "开始挥手")
-```
-
-- 回调返回值是 `LocaleString` → App 以 **Toast** 弹出
-- 返回 `None` → 不提示
-
-常用组件类型：
-
-| 类型 | 用途 |
-| --- | --- |
-| `IconComponent` | 普通图标按钮 |
-| `DefaultStateIconComponent` | 带开/关状态的图标按钮（如静音开关） |
-| `Component` | 基类 |
-
-注册组件：
-
-```python
-from booster_agent_framework import DefaultStateIconComponent, LocaleString
-
-wave_btn = DefaultStateIconComponent(
-    "wave_btn",                       # 组件 ID
-    LocaleString("Wave", "挥手"),      # 显示名称（也可传 {"en": ..., "zh": ...}）
-    "res/wave.png",                   # 图标
-    False,                            # 初始状态
-    self.on_wave_click,               # 点击回调
-    shortcut_id="wave",               # 关联 agent.toml 里的快捷键 id
-    display_sequence=0,               # 排序
-)
-self.component_manager.add_component(wave_btn)
-```
-
-组件管理 API：
-
-```python
-self.component_manager.get_component("wave_btn")     # 取组件
-self.component_manager.update_component(wave_btn)    # 更新组件（改文案/状态后必须调用才会同步到 App）
-```
-
----
-
-## 6. 存储、日志、多语言
-
-```python
-from pathlib import Path
-
-STATE_FILE = Path("volume_state.txt")   # 相对路径，落在 Agent 自己的存储目录
-
-# 读
-if self.storage_manager.file_exists(STATE_FILE):
-    text = self.storage_manager.read_text_file(STATE_FILE)
-
-# 写
-self.storage_manager.write_text_file(STATE_FILE, "0.50")
-```
-
-- **日志**：`self.logger.info(...)` / `self.logger.warn(...)` / `self.logger.error(...)`
-- **多语言**：`LocaleString({"en": "...", "zh": "..."})`，或 `LocaleString("English", "中文")`
-
-> 存储路径必须是**相对路径**，不要写绝对路径；绝对路径在机器人上通常没有写权限。
-
----
-
-## 7. 线程模型（最容易翻车的地方）
-
-框架的回调模型类似 Android：**所有用户回调都在主线程串行执行**，框架会等待需要返回值的回调返回。
-
-所以：
-
-- ❌ 不要在回调里做长耗时 IO、`sleep`、`join`、`future wait`
-- ❌ 不要在回调里等待**另一个 Python 回调**或后续 App 操作
-- ✅ 耗时任务丢到你自己的后台线程 / 进程 / 外部服务
-- ✅ 回调只做参数校验、状态记录、任务启动，然后**快速返回**
-- ✅ 必须同步等待时，给明确的**短超时**，并确认不会死锁
-
-违反这条的典型表现：App 界面卡住、后续按钮点了没反应。
-
----
-
-## 8. API Level 兼容
-
-```python
-from booster_agent_framework import get_sys_api_level
-
-if get_sys_api_level() >= 10800:
-    # 使用 10800 才有的接口
-    ...
-else:
-    # 降级方案
-    ...
-```
-
-- `min_api_level` 填**兼容的最低**版本，不要填当前开发环境的版本
-- 在 Studio 中按住 **Ctrl + 单击**任意 Agent API，可查看它的 `since` / `deprecated` 信息
-
----
-
-## 9. 构建与命名约定
-
-### 构建
-
-在 Booster Studio 中构建，产物位于 `build/<id>-<version>.agent`，文件名为 `<包名>-<版本号>.agent`。
-
-### 本仓库的目录与命名约定
-
-新增 Agent 放到 `agents/<kebab-case-名字>/`，并遵守 [agents/README.md](../agents/README.md) 的检查清单。
-
-建议包 id 统一为：
-
-```
-com.<组织>.k1.<功能>
-例如：com.wenzhoujike.k1.volume
-```
-
-> 现有 `agents/volume-adjustment` 的 id 是 `com.example.volumeagent`（原作者的），**保留原样不做改动**，避免破坏已分发出去的包。新写的 Agent 按上面的约定来。
-
----
-
-## 10. 最小完整示例
-
-```python
-# src/main.py
-from booster_agent_framework import (
-    AgentBase,
-    AgentFeatures,
-    Component,
-    IconComponent,
-    LocaleString,
-)
-from boosteros.robots.booster import BoosterRobot
-
-
-class HelloAgent(AgentBase):
-    def __init__(self) -> None:
-        super().__init__(AgentFeatures())
-        self.robot = BoosterRobot()
-        self.setup_components()
-
-    def setup_components(self) -> None:
-        btn = IconComponent(
-            "wave_btn",
-            LocaleString({"en": "Wave", "zh": "挥手"}),
-            "res/wave.png",
-            self.on_wave_click,
-            shortcut_id="wave",
-            display_sequence=0,
-        )
-        self.component_manager.add_component(btn)
-
-    def on_wave_click(self, component: Component) -> LocaleString | None:
-        self.robot.do_action("hand_wave")
-        return LocaleString({"en": "Waving", "zh": "开始挥手"})
-```
-
-配套 `agent.toml` 见 [第 2 节](#2-agenttoml运行配置)。
-
----
-
-## 参考实现
-
-- 本仓库：[`agents/volume-adjustment/src/main.py`](../agents/volume-adjustment/src/main.py) —— 一个完整的音量控制 Agent，展示了组件注册、状态刷新、异常回退、持久化
-- 官方示例：[RoboCup Demo](https://docs.booster.tech/zh-CN/docs/developer-guide/open-source/robocup-demo/)
+安装真机时使用最终签名 `.agent`，并核对下载文件的 SHA-256。发现问题先复现并保留回归检查，再做修复。版本保存与回退见 [版本管理](05-versioning.md)。

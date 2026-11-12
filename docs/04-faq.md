@@ -1,138 +1,61 @@
 # 04 · 常见问题排查
 
-按「现象 → 原因 → 处理」查。没解决的话，最后有获取日志和支持的方式。
+## 安装失败
 
----
+保留安装器的完整报错，依次检查：
 
-## 安装 / 启动
+1. 下载的是 `.agent` 二进制文件，文件大小和 SHA-256 与发布说明一致，而不是 GitHub 展示页或仓库 ZIP。
+2. SSH / SCP 连接的是目标机器人，传输完成后再运行安装器。示例步骤见 [单包安装](02-install-agent.md)。
+3. 包内 `requirements.models`、`platforms` 和 API 要求与机器人匹配。在线音乐 0.1.2 仅声明 `real_jetson`。
+4. 安装包已签名；更新同 ID 的 Agent 时，证书与原包一致。
+5. 机器人存储空间足够，系统满足相应 SDK 和运行依赖。
 
-### 安装 Agent 直接失败
+不要把所有安装失败都归因为固件低，也不要在未备份数据时直接删掉原 Agent。换电脑后失败，应比较下载文件和安装步骤；同一台机器人不因更换电脑而改变其平台。
 
-**原因**：固件低于 1.7.0，Python Agent 不支持。
+## 安装成功，App 没有进入该 Agent
 
-**处理**：升级固件到 1.7.0 以上。查看当前版本：[K1 产品手册 → 查看版本](https://docs.booster.tech/zh-CN/docs/product-manual/k1/firmware-version/check-version/)。
+在 App 的 Agent 列表中选择它。使用管理接口时，安装、启动和激活是不同操作：只 `start_agent` 可能处于 Inactive，还要 `set_agent`。启动异常时先查日志，不要用重复安装代替定位。
 
----
+## 本地音乐播放器
 
-### 装上了，但一启动就退出 / 报 `No module named 'boosteros'`
+| 现象 | 排查 |
+| --- | --- |
+| 没有歌单或进度入口 | 确认版本为 1.2.1，重新进入「音乐播放器」；源码构建要包含 `res/music_panel.zip` |
+| 歌单为空 | 打开「歌单与进度」上传 MP3，或检查 `music/` 目录并刷新歌单 |
+| 网页一直提示重试 | 手机是否能访问机器人面板地址、Agent 是否运行；IP 变化后重新打开页面 |
+| 无声音或播放失败 | 检查 FFmpeg、PulseAudio、系统音量和静音，查看 `playback failed` 日志 |
+| 上传失败 | MP3 格式、64 MiB 上限、文件名、存储空间和网络连接 |
 
-**原因**：1.7.0 固件**没有内置** `boosteros`，而 K1 上的 Agent 基本都要用 `BoosterRobot`。
+文件目录及播放模式见 [本地播放器说明](../agents/music-player/README.md)。
 
-**处理**：SSH 登录机器人后执行：
+## 在线音乐
 
-```bash
-pip install boosteros
-```
+| 现象 | 排查 |
+| --- | --- |
+| 搜索或二维码失败 | 机器人能否访问互联网、DNS 和平台服务是否可用；检查 Node 后端是否启动 |
+| 我的歌单不可用 | 切到网易云并登录；新机器人不会继承另一台机器人的账号 |
+| QQ 没有登录入口 | 当前版本已移除 QQ 登录及个人歌单，只保留公共搜索 |
+| 能搜索但不能播放 | 平台是否提供可播放地址、当前账号是否有权限、音频网络和 FFmpeg 是否正常 |
+| 源码构建后缺依赖或网页 | 按在线 Agent 自定义打包流程构建；不能只运行普通 Studio 构建 |
 
-固件 ≥ 1.8.0 已预置，不会出现这个问题。
+平台请求失败不一定是播放器代码故障。记录出错时间、平台、操作步骤和错误信息，避免反复无差别重写。
 
----
+## 音量调节与快捷键
 
-### 同一份包，教育版能装、极客版装不上（或反过来）
+音量调节读取和设置系统音量；音频服务异常时可能只能显示缓存值。静音恢复使用保存的非零音量。日志关键字为 `get_system_volume failed` 和 `set_system_volume`。
 
-**原因**：两类机器是**不同平台**：教育版 / 专业版是 `real_jetson`，**极客版是 `real_qcom`**。
+快捷键无反应时，确认当前活动 Agent、手柄连接、包内 `shortcut_list.json` 与代码中的 `shortcut_id`。按键表见各 Agent 的 README。
 
-**处理**：构建时 `build.toml` 的 `platform.supports` 两个平台都要包含，分别出包。
+## 按钮卡住或状态不更新
 
-```toml
-[platform]
-supports = ["real_jetson", "real_qcom"]
-```
+可能涉及回调阻塞、锁等待、音频子进程、网络超时或界面与后端连接中断。记录完整操作顺序，检查日志和接口状态，再判断故障位置。单次点击正常不能证明连续切歌、暂停和跳转的组合也正常。
 
----
+## 获取诊断信息
 
-### App 里看不到刚装的 Agent
+在已验证的 Jetson 系统中，Agent 日志位于 `/var/log/booster_agent/<包ID>/`，也可查看 Studio 输出。其他系统以实际日志配置为准。提供以下信息：
 
-1. 确认安装过程真的完成了（看 Studio 输出面板）
-2. 在 App 里点击**左上角 Agent 名称** → 进入 Agent 切换界面
-3. 仍然没有：重新安装一次；包名与已安装的同名包冲突时，先删再装
+- 固件版本、目标平台、电脑系统和安装工具版本。
+- 安装包名称、字节数、SHA-256 和安装器完整报错。
+- 能否复现、具体操作顺序、发生时间、Agent 日志。
 
----
-
-## 运行 / 交互
-
-### 点了按钮没反应，或点了几下后 App 卡住
-
-**原因**：几乎都是**回调阻塞了主线程**。框架的所有 Python 回调都在主线程串行执行，框架会等回调返回；单个回调耗时过长会阻塞后续回调，并让 App 卡顿。
-
-**处理**：
-
-- 回调里不要做长耗时 IO、`sleep`、`join`、`future wait`
-- 不要等待另一个 Python 回调或后续 App 操作
-- 耗时任务丢到自己的后台线程 / 进程，回调只负责启动任务然后立刻返回
-- 必须同步等待时，设置**明确的短超时**
-
-参考：[API 组成与使用 · 线程模型](https://docs.booster.tech/zh-CN/docs/developer-guide/agent-development/api/overview/)
-
----
-
-### 手柄快捷键不生效
-
-逐条排查：
-
-1. **快捷键是否在 `agent.toml` 注册过**，且代码里的 `shortcut_id` 拼写一致
-2. **是否用了保留键**：`BACK`、`START`、`LS`、`RS` 不可用
-3. **是否用了不支持的键**：`CENTER`、`LEFT_UP`、`LEFT_DOWN`、`RIGHT_UP`、`RIGHT_DOWN`
-4. 按键名拼写是否正确（参考官方[按键列表](https://docs.booster.tech/zh-CN/docs/developer-guide/agent-development/api/joystick-and-shortcuts/basic-types/#joystickkey)）
-5. 部分快捷键是**组合键**（如 `L2 + R2 + A`），注意顺序与同时按下
-6. 确认当前**活动 Agent** 就是你的 Agent（App 左上角确认）
-
----
-
-### 音量调节 Agent：提示「读取音量失败」或「音量调节不可用」
-
-**原因**：音频子系统调用异常。`main.py` 里对 `get_system_volume()` / `set_system_volume()` 都做了异常捕获，失败时会回退到缓存值而不是崩溃。
-
-**处理**：
-
-1. 确认机器人音频服务正常（其他系统音是否正常）
-2. 重启机器人音频相关服务后重试
-3. 查看 Agent 日志中的 `get_system_volume failed` / `set_system_volume(...) failed` 具体异常
-4. 注意：该 Agent 读取的是 `robot.audio_manager`，仅在 **K1 真机**上有意义；虚拟机器人上音量接口可能不可用
-
----
-
-### 静音后取消静音，音量不是原来的值
-
-**原因**：Agent 会持久化「最后一个非零音量」到 `volume_state.txt`。
-
-**处理**：如果这个文件损坏或版本迁移，会退回默认值 50%。删除 Agent 存储目录下的 `volume_state.txt` 可重置。
-
----
-
-## 构建 / 发布
-
-### 构建出来的包提示签名相关错误
-
-**原因**：未配置 `[sign]` 时使用通用 debug 证书；某些场景要求正式证书。
-
-**处理**：配置专属密钥库，见官方 [签名与证书](https://docs.booster.tech/zh-CN/docs/developer-guide/agent-development/configuration-and-release/signing-and-certificates/)。密钥库与密码**不要提交到仓库**。
-
----
-
-### 改了代码但机器人上行为没变
-
-**原因**：安装的是旧包，或版本号没变导致没触发升级。
-
-**处理**：提升 `agent.toml` 里的 `version`，重新构建并重新安装。
-
----
-
-## 获取日志与支持
-
-- **Agent 日志**：代码里的 `self.logger` 输出，在 Booster Studio 的输出 / 日志面板查看
-- **系统日志**：参考 [K1 故障排查与支持 · 日志获取](https://docs.booster.tech/zh-CN/docs/product-manual/k1/troubleshooting/restore-factory-settings/)
-- **恢复出厂设置**：同上（**谨慎**，会清除机器人上的自定义内容）
-- **官方支持**：<software_support@booster.tech>
-
----
-
-## 还是不行？
-
-带上这些信息再问，能省一大半时间：
-
-1. 固件版本号（App / Studio 里查看）
-2. 机器人型号（K1 教育版 / 专业版 / 极客版）
-3. 包名与版本（`.agent` 文件名）
-4. 报错完整日志（不要截图截一半）
-5. 复现步骤：点哪个按钮、第几次出现
+分享日志前去掉账号凭据、Cookie 和访问令牌。回退前备份私有存储，见 [版本管理](05-versioning.md)。

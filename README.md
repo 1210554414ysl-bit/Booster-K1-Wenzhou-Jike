@@ -2,7 +2,7 @@
 
 加速进化 **Booster K1** 人形机器人的 Agent 集合，包含本地音乐播放器、在线音乐、系统音量控制和开发说明。
 
-新版音乐播放器可在 Booster App 里浏览完整歌单、搜索并点歌、查看和拖动实时进度条。手机与 K1 接入同一局域网即可操作。
+本地音乐播放器用于机器人中已保存的 MP3 / WAV，提供歌单、按文件名搜索、进度与手机 MP3 上传。在线音乐是另一个独立 Agent，提供网易云接入及 QQ 公共搜索。两者的安装包、账号需求和平台范围不同。
 
 - 各 Agent 的源码、使用说明和已发布的安装包位于各自目录。
 - 首次使用可从[快速开始](#快速开始)进入，开发者可查看 [Agent 目录约定](agents/README.md)。
@@ -16,10 +16,10 @@
 | Agent | 目录 | 功能 | 版本 | 手柄快捷键 |
 | --- | --- | --- | --- | --- |
 | 音量调节 | [`agents/volume-adjustment`](agents/volume-adjustment/README.md) | 读取 / 增大 / 减小 / 静音机器人系统音量 | 1.0.0 | `A` 音量+ ・ `B` 音量- ・ `Y` 静音 |
-| 音乐播放器 | [`agents/music-player`](agents/music-player/README.md) | 本地 MP3 / WAV、完整歌单、按文件名搜索、进度跳转与系统音量 | 1.2.1 | `A` 播放暂停 ・ `X` 上一首 ・ `B` 下一首 ・ `Y` 静音 ・ `LB+A` 切模式 |
+| 本地音乐播放器 | [`agents/music-player`](agents/music-player/README.md) | 本地 MP3 / WAV、完整歌单、按文件名搜索、进度跳转与系统音量 | 1.2.1 | `A` 播放暂停 ・ `X` 上一首 ・ `B` 下一首 ・ `Y` 静音 ・ `LB+A` 切模式 |
 | 在线音乐 | [`agents/online-music`](agents/online-music/README.md) | 网易云扫码登录、个人歌单和在线播放，QQ 公共搜索 | 0.1.2 | `A` 播放暂停 ・ `X` 上一首 ・ `B` 下一首 ・ `Y` 静音 ・ `LB+A` 切模式 |
 
-## 音乐播放器怎么用
+## 本地音乐播放器怎么用
 
 1. 手机与 K1 接入同一局域网。在 Booster App 左上角切换到 **音乐播放器**。
 2. 在主控页点 **歌单与进度**。在搜索框输入歌名或文件名里的歌手名，也可以直接从完整歌单里点选歌曲。
@@ -27,15 +27,15 @@
 
 支持顺序播放、随机播放和单曲循环。随机模式下手动点「下一首」也会随机，「上一首」会回到实际播过的歌曲。添加本地歌曲后可点 **刷新歌单** 重新扫描。
 
-要从手机加歌，在「歌单与进度」的 **从手机添加 MP3** 里选择文件，再点 **上传** 或 **上传并播放**。单个文件最多 64 MB，同名文件会另存。
+要从手机加歌，在「歌单与进度」的 **从手机添加 MP3** 里选择文件，再点 **上传** 或 **上传并播放**。单个文件最多 64 MiB，同名文件会另存。
 
-**当前版本** · [下载本地音乐播放器 1.2.1 签名安装包](agents/music-player/com.wenzhoujike.k1.music-1.2.1.agent)。已包含歌单、搜索、进度条和手机 MP3 上传面板，沿用旧版签名证书。源码、面板资源与安装包已同步。
+**当前版本** · [下载本地音乐播放器 1.2.1 签名安装包](https://raw.githubusercontent.com/1210554414ysl-bit/Booster-K1-Wenzhou-Jike/main/agents/music-player/com.wenzhoujike.k1.music-1.2.1.agent)。已包含歌单、搜索、进度条和手机 MP3 上传面板，沿用旧版签名证书。源码、面板资源与安装包已同步。
 
 ---
 
 ## 在线音乐怎么用
 
-1. 将[在线音乐 0.1.2 安装包](agents/online-music/com.wenzhoujike.k1.onlinemusic-0.1.2.agent)安装到 Jetson ARM64 K1，在 Booster App 左上角选择「在线音乐」。
+1. 按[单包安装说明](docs/02-install-agent.md)将[在线音乐 0.1.2 安装包](https://raw.githubusercontent.com/1210554414ysl-bit/Booster-K1-Wenzhou-Jike/main/agents/online-music/com.wenzhoujike.k1.onlinemusic-0.1.2.agent)安装到 Jetson ARM64 K1，在 Booster App 左上角选择「在线音乐」。
 2. 手机与机器人接入同一局域网，打开「在线点歌」。机器人还需要能够访问互联网。
 3. 选择网易云音乐，扫码登录后搜索歌曲，或进入「我的歌单」点歌。
 
@@ -47,25 +47,15 @@
 
 ## 快速开始
 
-### 第 1 步：准备环境
+### 第 1 步：核对环境与平台
 
-| 项目 | 要求 |
-| --- | --- |
-| 机器人固件 | **≥ 1.7.0**（Python Agent 的安装下限）；**≥ 1.8.0** 已预置 `boosteros` 库 |
-| Booster Studio | 建议 **1.13.0 及以上**（对应 API Level `10800`） |
-| Booster App | **1.7 及以上** |
-| 机器人型号 | Booster K1（教育版 / 专业版 → `real_jetson`，**极客版 → `real_qcom`**） |
+当前在线音乐包只声明支持 `real_jetson`；本地音乐和音量调节包声明的范围更广，但不代表每个平台均已真机验收。包内最低 API 声明均为 `10700`，构建 API 为 `10800`。兼容性和运行依赖见 [环境准备](docs/01-setup.md)。
 
-详细步骤见 **[docs/01-setup.md](docs/01-setup.md)**。
+### 第 2 步：安装成品包
 
-### 第 2 步：把 Agent 装到机器人
+只使用功能时，下载单个签名 `.agent` 并按[已验证的 SSH / SCP 安装步骤](docs/02-install-agent.md)安装。无需先下载整个仓库或重新构建。
 
-两种方式，二选一：
-
-- **方式 A（推荐给开发者）**：用 Booster Studio 连接机器人后一键安装 / 调试
-- **方式 B（推荐给使用者）**：选择仓库里已发布的 `.agent` 文件安装，安装包版本见文件名
-
-详细步骤见 **[docs/02-install-agent.md](docs/02-install-agent.md)**。
+从源码开发时，按对应 Agent 的 README 准备环境；在线音乐使用专用打包流程，不能直接套用本地音乐的 Studio 构建方式。
 
 ### 第 3 步：在 App 里切换并操作
 
@@ -78,13 +68,14 @@
 ```
 Booster-K1-Wenzhou-Jike/
 ├── README.md                       # 本文件：仓库总览 + 快速开始
-├── CHANGELOG.md                    # 版本变更记录（与 git tag 对应）
+├── CHANGELOG.md                    # 当前发布与历史开发记录
 ├── docs/
 │   ├── 01-setup.md                 # 环境准备：Studio、固件、连接机器人
-│   ├── 02-install-agent.md         # 安装 Agent：一键安装 / .agent 分发
+│   ├── 02-install-agent.md         # 安装 Agent：单个 .agent 的传输与安装
 │   ├── 03-develop-agent.md         # 开发自己的 K1 Agent
 │   ├── 04-faq.md                   # 常见问题排查
-│   └── 05-versioning.md            # ⭐ 版本管理与回滚（装坏了怎么救）
+│   ├── 05-versioning.md            # 版本管理与回退
+│   └── 06-documentation-audit.md   # 文档审查范围与待验证项
 ├── scripts/
 │   └── release.ps1                 # 一键发布：归档 .agent + 提交 + 打 tag
 └── agents/
@@ -101,17 +92,17 @@ Booster-K1-Wenzhou-Jike/
 
 ## 版本管理与回滚
 
-每次改动都提交、每个能用的版本都打 tag —— 装坏了 30 秒能退回上一版。
+保存源码提交、签名安装包和验证记录，发布时用 tag 定位版本。tag 不等于已创建 Release，也不等于所有平台均可运行。
 
 | 内容 | 在哪 |
 | --- | --- |
 | 完整说明（含 git 入门、回滚步骤） | [docs/05-versioning.md](docs/05-versioning.md) |
 | 变更记录 | [CHANGELOG.md](CHANGELOG.md) |
-| 一键发布 | `.\scripts\release.ps1 -Agent music-player -Push` |
-| 历史安装包 | [Releases](https://github.com/1210554414ysl-bit/Booster-K1-Wenzhou-Jike/releases) |
+| 发布辅助脚本 | `scripts/release.ps1`，使用前阅读[适用范围](docs/05-versioning.md#已有发布脚本的适用范围) |
+| 历史安装包 | 对应 tag 的 Agent 目录；部分版本另有 [Release 附件](https://github.com/1210554414ysl-bit/Booster-K1-Wenzhou-Jike/releases) |
 
 > 一句话流程：改代码 → 构建 → **装真机验证** → `release.ps1` 打 tag → 推送。
-> 出问题就删掉机器人上的 Agent，从 Releases 装回上一个 tag 的包。
+> 回退前备份歌曲、设置和账号数据，先确认版本与证书限制；不要直接删除机器人系统目录。
 
 ---
 
